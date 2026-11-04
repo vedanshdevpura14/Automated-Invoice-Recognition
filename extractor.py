@@ -158,13 +158,14 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
     elif "€" in raw_text or "EUR" in raw_text:
         currency = "EUR"
 
-    # 5. Extract Totals
+    # 5. Extract Totals (with support for Tax (18% GST), @ 18%, etc.)
     def find_amount(keywords: list[str]) -> float:
         for kw in keywords:
-            m = re.search(rf"{kw}[:\s]+(?:[A-Z$₹€\s]*)?([\d,]+(?:\.\d{{1,2}})?)", raw_text, re.IGNORECASE)
+            pattern = rf"\b{kw}\b(?:\s*\([^)]*\))?(?:\s*@\s*[\d.]+%|\s*rate\s*[\d.]+%)?[:\s]+(?:[A-Za-z$€\s]*)?([\d,]+(?:\.\d{{1,2}})?)"
+            m = re.search(pattern, raw_text, re.IGNORECASE)
             if m:
                 try:
-                    return float(m.group(1).replace(",", ""))
+                    return float(m.group(1).replace(',', ''))
                 except ValueError:
                     pass
         return 0.0
@@ -173,29 +174,72 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
     subtotal = find_amount(["subtotal", "sub total", "taxable value", "amount before tax"])
     tax = find_amount(["tax", "gst", "vat", "igst", "cgst"])
 
-    # 6. Extract Line Items
+    # 6. Extract Line Items (handles pipe-delimited, tab-delimited, and space-delimited tables)
     line_items: list[LineItemSchema] = []
-    item_rows = re.findall(
-        r"([A-Z0-9\-_]{3,12})\s+([A-Za-z0-9\s\-_]+?)\s+(\d+(?:\.\d+)?)\s+(?:(?:[₹$€]\s*)?([\d,]+(?:\.\d+)?)\s+)?(?:(?:[₹$€]\s*)?([\d,]+(?:\.\d+)?))",
-        raw_text
-    )
 
-    for row in item_rows:
-        code = row[0].strip()
-        desc = row[1].strip()
-        try:
-            qty = float(row[2])
-            price = float(row[3].replace(",", "")) if row[3] else 0.0
-            line_tot = float(row[4].replace(",", "")) if row[4] else (qty * price)
-            line_items.append(LineItemSchema(
-                item_code=code,
-                description=desc,
-                quantity=qty,
-                unit_price=price,
-                total_price=line_tot
-            ))
-        except ValueError:
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line or "---" in line:
             continue
+        lower_line = line.lower()
+        if "item code" in lower_line or "description" in lower_line or "subtotal" in lower_line or "grand total" in lower_line:
+            continue
+
+        # Check pipe-separated rows (e.g. Code | Desc | Qty | Unit Price | Total)
+        if "|" in line:
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 3:
+                item_code = parts[0]
+                item_desc = parts[1]
+                qty_match = re.search(r"([\d,]+(?:\.\d+)?)", parts[2])
+                if qty_match:
+                    try:
+                        qty = float(qty_match.group(1).replace(",", ""))
+                        unit_price = 0.0
+                        total_price = 0.0
+                        if len(parts) >= 4:
+                            p_match = re.search(r"([\d,]+(?:\.\d+)?)", parts[3])
+                            if p_match:
+                                unit_price = float(p_match.group(1).replace(",", ""))
+                        if len(parts) >= 5:
+                            t_match = re.search(r"([\d,]+(?:\.\d+)?)", parts[4])
+                            if t_match:
+                                total_price = float(t_match.group(1).replace(",", ""))
+                        else:
+                            total_price = round(qty * unit_price, 2)
+
+                        line_items.append(LineItemSchema(
+                            item_code=item_code,
+                            description=item_desc,
+                            quantity=qty,
+                            unit_price=unit_price,
+                            total_price=total_price
+                        ))
+                    except ValueError:
+                        pass
+
+    # Fallback to whitespace-delimited rows if no pipe rows were parsed
+    if not line_items:
+        item_rows = re.findall(
+            r"([A-Z0-9\-_]{3,16})\s+([A-Za-z0-9\s\-_]+?)\s+(\d+(?:\.\d+)?)\s+(?:(?:[₹$€]\s*)?([\d,]+(?:\.\d+)?)\s+)?(?:(?:[₹$€]\s*)?([\d,]+(?:\.\d+)?))",
+            raw_text
+        )
+        for row in item_rows:
+            code = row[0].strip()
+            desc = row[1].strip()
+            try:
+                qty = float(row[2])
+                price = float(row[3].replace(",", "")) if row[3] else 0.0
+                line_tot = float(row[4].replace(",", "")) if row[4] else (qty * price)
+                line_items.append(LineItemSchema(
+                    item_code=code,
+                    description=desc,
+                    quantity=qty,
+                    unit_price=price,
+                    total_price=line_tot
+                ))
+            except ValueError:
+                continue
 
     if not line_items:
         line_items.append(LineItemSchema(
