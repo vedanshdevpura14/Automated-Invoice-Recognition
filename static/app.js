@@ -3,7 +3,17 @@ let currentReconciliationId = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   if (window.lucide) lucide.createIcons();
-  loadDashboard();
+  
+  // Restore view from URL hash on page refresh
+  const hash = window.location.hash.replace("#", "");
+  if (hash.startsWith("rec-")) {
+    const recId = hash.replace("rec-", "");
+    viewReconciliation(recId);
+  } else if (hash && ["dashboard", "upload", "reconciliations", "audit", "vendors"].includes(hash)) {
+    switchTab(hash);
+  } else {
+    loadDashboard();
+  }
   loadAuditLogs();
 });
 
@@ -26,6 +36,7 @@ function switchTab(tabName) {
   };
   const titleEl = document.getElementById("page-title");
   if (titleEl && titles[tabName]) titleEl.textContent = titles[tabName];
+  window.location.hash = tabName;
 
   if (tabName === "dashboard") loadDashboard();
   if (tabName === "reconciliations") loadReconciliationsList();
@@ -50,7 +61,8 @@ async function loadDashboard() {
     // Load recent table
     const recRes = await fetch("/api/reconciliations?limit=5");
     const recData = await recRes.json();
-    renderRecentTable(recData.items);
+    const items = Array.isArray(recData) ? recData : (recData.items || []);
+    renderRecentTable(items);
   } catch (err) {
     console.error("Failed to load dashboard metrics:", err);
   }
@@ -168,6 +180,7 @@ async function viewReconciliation(recId) {
     if (!res.ok) throw new Error("Record not found");
     const rec = await res.json();
     currentReconciliationId = rec.id;
+    window.location.hash = "rec-" + rec.id;
 
     // Switch tab to reconciliations & show detail view
     switchTab("reconciliations");
@@ -243,6 +256,7 @@ async function viewReconciliation(recId) {
 }
 
 function closeDetailView() {
+  window.location.hash = "reconciliations";
   document.getElementById("reconciliation-detail-view").classList.add("hidden");
   document.getElementById("reconciliations-list-view").classList.remove("hidden");
   loadReconciliationsList();
@@ -257,12 +271,13 @@ async function loadReconciliationsList() {
     const tbody = document.getElementById("full-table-body");
     if (!tbody) return;
 
-    if (!data.items || data.items.length === 0) {
+    const items = Array.isArray(data) ? data : (data.items || []);
+    if (!items || items.length === 0) {
       tbody.innerHTML = `<tr><td colspan="8" class="p-6 text-center text-slate-500">No matching records found.</td></tr>`;
       return;
     }
 
-    tbody.innerHTML = data.items.map(r => `
+    tbody.innerHTML = items.map(r => `
       <tr class="hover:bg-dark-900/50 transition-colors">
         <td class="p-3 font-mono font-semibold text-blue-400">${r.reconciliation_code}</td>
         <td class="p-3 font-medium text-slate-200">${r.vendor_name || 'N/A'}</td>

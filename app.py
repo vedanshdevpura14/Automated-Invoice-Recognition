@@ -131,8 +131,10 @@ def list_reconciliations(
     if status and status.upper() != "ALL":
         query = query.filter(ReconciliationRecord.status == status.upper())
 
+    total = query.count()
     records = query.order_by(desc(ReconciliationRecord.created_at)).offset(offset).limit(limit).all()
-    return [r.to_dict() for r in records]
+    items = [r.to_dict() for r in records]
+    return {'items': items, 'total': total}
 
 
 @app.get("/api/reconciliations/{rec_id}")
