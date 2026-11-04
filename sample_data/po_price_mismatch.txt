@@ -1,0 +1,12 @@
+PURCHASE ORDER
+Vendor: TechMatrix Solutions Ltd
+PO No: PO-2026-202
+Date: 2026-10-28
+
+Item Code | Description | Qty | Unit Price | Total
+---------------------------------------------------------
+MON-24-IPS | 24-inch IPS UltraSharp Monitors | 100 | 500.00 | 50000.00
+
+Subtotal: INR 50000.00
+Tax: INR 9000.00
+Total Amount: INR 59000.00

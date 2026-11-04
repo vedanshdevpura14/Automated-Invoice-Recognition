@@ -1,0 +1,8 @@
+GOODS RECEIPT NOTE (GRN)
+Warehouse: North Depot Delhi
+GRN No: GRN-2026-202
+Date: 2026-11-03
+
+Item Code | Description | Received Qty
+---------------------------------------------------------
+MON-24-IPS | 24-inch IPS UltraSharp Monitors | 100

@@ -1,0 +1,8 @@
+GOODS RECEIPT NOTE (GRN)
+Warehouse: West Distribution Hub Mumbai
+GRN No: GRN-2026-303
+Date: 2026-11-01
+
+Item Code | Description | Received Qty | Remarks
+---------------------------------------------------------
+RAM-16GB-DDR4 | 16GB DDR4 Server Memory | 90 | Partial delivery received

@@ -1,0 +1,14 @@
+INVOICE
+Vendor: ABC Technologies Private Limited
+Invoice No: INV-2026-101
+Date: 2026-11-04
+Bill To: Enterprise Corp Global
+
+Item Code | Description | Qty | Unit Price | Total
+---------------------------------------------------------
+LAP-DELL-5420 | Dell Latitude 5420 Laptops | 100 | 50000.00 | 5000000.00
+
+Subtotal: INR 5000000.00
+Tax (18% GST): INR 900000.00
+Total Amount: INR 5900000.00
+Payment Terms: Net 30

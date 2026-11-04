@@ -1,0 +1,12 @@
+TAX INVOICE
+Vendor: TechMatrix Solutions Ltd
+Invoice No: INV-2026-202
+Date: 2026-11-04
+
+Item Code | Description | Qty | Unit Price | Total
+---------------------------------------------------------
+MON-24-IPS | 24-inch IPS UltraSharp Monitors | 100 | 550.00 | 55000.00
+
+Subtotal: INR 55000.00
+Tax: INR 9900.00
+Total Amount: INR 64900.00

@@ -1,0 +1,11 @@
+GOODS RECEIPT NOTE (GRN)
+Warehouse: Central Facility Bangalore
+GRN No: GRN-2026-101
+Date: 2026-11-02
+Supplier: ABC Technologies
+
+Item Code | Description | Received Qty | Condition
+---------------------------------------------------------
+LAP-DELL-5420 | Dell Latitude 5420 Laptops | 100 | Verified Good
+
+Receiver Signature: Warehouse Supervisor

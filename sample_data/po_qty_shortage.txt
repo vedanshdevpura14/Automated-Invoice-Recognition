@@ -1,0 +1,12 @@
+PURCHASE ORDER
+Vendor: Apex Global Hardware
+PO No: PO-2026-303
+Date: 2026-10-20
+
+Item Code | Description | Qty | Unit Price | Total
+---------------------------------------------------------
+RAM-16GB-DDR4 | 16GB DDR4 Server Memory | 100 | 2000.00 | 200000.00
+
+Subtotal: INR 200000.00
+Tax: INR 36000.00
+Total Amount: INR 236000.00
