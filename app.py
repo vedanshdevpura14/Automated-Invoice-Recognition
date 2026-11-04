@@ -3,53 +3,152 @@ import uuid
 import json
 import csv
 import io
+from pathlib import Path
 from datetime import datetime
-from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
-from fastapi.responses import Response, StreamingResponse
+from typing import Optional
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
-from app.core.config import settings
-from app.core.database import get_db
-from app.models.db_models import (
+from models import (
+    init_db,
+    get_db,
+    UPLOAD_DIR,
     ReconciliationRecord,
     ReconciliationLineItem,
     AuditLogEntry,
-    VendorMemoryRecord
-)
-from app.schemas.schemas import (
+    VendorMemoryRecord,
     DocumentDataSchema,
     LineItemSchema,
-    ThreeWayMatchResult,
     ReviewRequest,
-    ArbitrationResponse
+    record_audit_log,
+    update_vendor_memory
 )
-from app.services.ocr_service import extract_text_from_file
-from app.services.extraction_service import extract_document
-from app.services.matching_engine import perform_three_way_reconciliation
-from app.services.arbitration_agent import arbitrate_exceptions
-from app.services.audit_service import record_audit_log, update_vendor_memory
+from extractor import extract_text_from_file, extract_document
+from matcher import perform_three_way_reconciliation
+from agent import arbitrate_exceptions
 
-router = APIRouter()
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-@router.get("/health")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Ensure database tables are created
+    init_db()
+    print("[CacheFlow AI] Database tables verified.")
+    yield
+    print("[CacheFlow AI] Shutting down.")
+
+
+app = FastAPI(
+    title="CacheFlow AI - Automated Invoice Reconciliation",
+    version="2.0.0",
+    description="Agentic 3-Way Invoice Reconciliation Platform with Deterministic Financial Matching & AI Arbitration",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve web dashboard static assets
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def serve_index():
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(str(index_file))
+    return {"message": "CacheFlow AI API is running. Open /docs for API documentation."}
+
+
+# ==========================================================
+# API Endpoints
+# ==========================================================
+
+@app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
     """System health check endpoint."""
     total_recs = db.query(ReconciliationRecord).count()
-    has_gemini = bool(settings.GEMINI_API_KEY and len(settings.GEMINI_API_KEY) > 8)
+    has_gemini = bool(os.getenv("GEMINI_API_KEY") and len(os.getenv("GEMINI_API_KEY", "")) > 8)
     return {
         "status": "healthy",
-        "version": settings.VERSION,
+        "version": "2.0.0",
         "database": "connected",
         "total_reconciliations_stored": total_recs,
         "gemini_api_configured": has_gemini,
         "ai_extraction_mode": "Gemini 1.5 Flash" if has_gemini else "Deterministic Heuristics Engine (Offline Safe)",
-        "ai_arbitration_mode": "Gemini 1.5 Pro" if has_gemini else "Deterministic Reasoner (Offline Safe)"
+        "ai_arbitration_mode": "Gemini 1.5 Flash/Pro" if has_gemini else "Deterministic Reasoner (Offline Safe)"
     }
 
 
-@router.post("/upload-and-reconcile")
+@app.get("/api/dashboard/stats")
+def get_dashboard_metrics(db: Session = Depends(get_db)):
+    """Returns analytics KPIs and variance breakdowns for the dashboard."""
+    total = db.query(ReconciliationRecord).count()
+    matched = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "MATCHED").count()
+    approved = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "APPROVED").count()
+    variances = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "VARIANCE_DETECTED").count()
+    escalated = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "ESCALATED").count()
+    rejected = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "REJECTED").count()
+
+    total_variance_sum = sum(r.variance_total for r in db.query(ReconciliationRecord.variance_total).all())
+    vendors = db.query(VendorMemoryRecord).order_by(desc(VendorMemoryRecord.total_reconciliations)).limit(5).all()
+
+    return {
+        "total_processed": total,
+        "matched_count": matched,
+        "approved_count": approved,
+        "variance_count": variances,
+        "escalated_count": escalated,
+        "rejected_count": rejected,
+        "match_rate_pct": round((matched / total * 100), 1) if total > 0 else 0.0,
+        "total_variance_amount": round(total_variance_sum, 2),
+        "top_vendors": [v.to_dict() for v in vendors]
+    }
+
+
+@app.get("/api/reconciliations")
+def list_reconciliations(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """Lists historical reconciliation records with optional status filtering."""
+    query = db.query(ReconciliationRecord)
+    if status and status.upper() != "ALL":
+        query = query.filter(ReconciliationRecord.status == status.upper())
+
+    records = query.order_by(desc(ReconciliationRecord.created_at)).offset(offset).limit(limit).all()
+    return [r.to_dict() for r in records]
+
+
+@app.get("/api/reconciliations/{rec_id}")
+def get_reconciliation_detail(rec_id: int, db: Session = Depends(get_db)):
+    """Retrieves full reconciliation audit record including line comparisons & logs."""
+    rec = db.query(ReconciliationRecord).filter(ReconciliationRecord.id == rec_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Reconciliation record not found")
+
+    data = rec.to_dict()
+    logs = db.query(AuditLogEntry).filter(AuditLogEntry.reconciliation_id == rec_id).order_by(AuditLogEntry.timestamp).all()
+    data["audit_logs"] = [l.to_dict() for l in logs]
+    return data
+
+
+@app.post("/api/upload-and-reconcile")
 async def upload_and_reconcile(
     invoice_file: UploadFile = File(...),
     po_file: UploadFile = File(...),
@@ -59,34 +158,33 @@ async def upload_and_reconcile(
     """
     Main 3-Way Reconciliation Pipeline:
     1. Ingests Invoice, PO, and GRN documents
-    2. Node 1: Extraction Agent (OCR + Gemini / Heuristic Parser)
+    2. Node 1: Extraction Agent (PyMuPDF + Gemini / Heuristic Parser)
     3. Node 2: Matching Agent (Deterministic 3-Way Match with tolerances)
     4. Node 3: Arbitration Agent (AI Reasoner, Risk Scoring, Vendor Dispute Drafter)
     5. Persistence in SQLite & Audit Log registration
     """
-    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     session_id = str(uuid.uuid4())[:8]
 
-    # Save uploaded files
+    allowed_exts = [".pdf", ".png", ".jpg", ".jpeg", ".txt"]
     file_paths = {}
     for role, f in [("invoice", invoice_file), ("po", po_file), ("grn", grn_file)]:
         ext = os.path.splitext(f.filename)[1].lower()
-        if ext not in settings.ALLOWED_EXTENSIONS:
+        if ext not in allowed_exts:
             raise HTTPException(status_code=400, detail=f"File {f.filename} format '{ext}' is not supported. Use PDF, TXT, or images.")
-        
+
         saved_filename = f"{session_id}_{role}_{f.filename}"
-        dest_path = os.path.join(settings.UPLOAD_DIR, saved_filename)
+        dest_path = os.path.join(UPLOAD_DIR, saved_filename)
         content = await f.read()
         with open(dest_path, "wb") as out:
             out.write(content)
         file_paths[role] = dest_path
 
-    # Audit file upload
     record_audit_log(
         db,
         event_type="DOCUMENT_UPLOAD",
         source="API_GATEWAY",
-        description=f"Received 3 documents for reconciliation batch: {invoice_file.filename}, {po_file.filename}, {grn_file.filename}"
+        description=f"Received 3 documents for batch: {invoice_file.filename}, {po_file.filename}, {grn_file.filename}"
     )
 
     # Node 1: Extraction Agent
@@ -116,14 +214,13 @@ async def upload_and_reconcile(
         db,
         event_type="MATCH_EVALUATION",
         source="MATCHING_AGENT",
-        description=f"Deterministic matching status: {match_result.status} (Score: {match_result.match_score}%, Variances: {len(match_result.variances)})",
+        description=f"Matching result: {match_result.status} (Score: {match_result.match_score}%, Variances: {len(match_result.variances)})",
         severity="WARNING" if match_result.status != "MATCHED" else "INFO"
     )
 
     # Node 3: AI Arbitration Agent
     arbitration = arbitrate_exceptions(match_result, invoice_data, po_data, grn_data)
 
-    # Create Database Record
     rec_code = f"REC-{datetime.utcnow().strftime('%Y%m%d')}-{session_id.upper()}"
     reconciliation = ReconciliationRecord(
         reconciliation_code=rec_code,
@@ -155,7 +252,6 @@ async def upload_and_reconcile(
     db.commit()
     db.refresh(reconciliation)
 
-    # Save Line Item Records
     for item in match_result.line_comparisons:
         line_item = ReconciliationLineItem(
             reconciliation_id=reconciliation.id,
@@ -174,7 +270,6 @@ async def upload_and_reconcile(
         )
         db.add(line_item)
 
-    # Update Vendor Memory
     update_vendor_memory(db, invoice_data.vendor_name, was_matched=(match_result.status == "MATCHED"))
 
     record_audit_log(
@@ -191,47 +286,9 @@ async def upload_and_reconcile(
     return reconciliation.to_dict()
 
 
-@router.get("/reconciliations")
-def list_reconciliations(
-    status: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
-    db: Session = Depends(get_db)
-):
-    """Lists past reconciliation records with optional filtering."""
-    query = db.query(ReconciliationRecord).order_by(desc(ReconciliationRecord.created_at))
-    if status and status.upper() != "ALL":
-        query = query.filter(ReconciliationRecord.status == status.upper())
-    
-    total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    return {
-        "total": total,
-        "items": [item.to_dict() for item in items]
-    }
-
-
-@router.get("/reconciliations/{rec_id}")
-def get_reconciliation_detail(rec_id: int, db: Session = Depends(get_db)):
-    """Retrieves full 3-way reconciliation audit details for a specific record."""
-    rec = db.query(ReconciliationRecord).filter(ReconciliationRecord.id == rec_id).first()
-    if not rec:
-        raise HTTPException(status_code=404, detail="Reconciliation record not found")
-    
-    data = rec.to_dict()
-    # Add audit logs for this record
-    logs = db.query(AuditLogEntry).filter(AuditLogEntry.reconciliation_id == rec_id).order_by(AuditLogEntry.timestamp).all()
-    data["audit_logs"] = [l.to_dict() for l in logs]
-    return data
-
-
-@router.post("/reconciliations/{rec_id}/review")
-def review_reconciliation(
-    rec_id: int,
-    review: ReviewRequest,
-    db: Session = Depends(get_db)
-):
-    """Human-in-the-Loop review: Approve, Reject, or Escalate with justification notes."""
+@app.post("/api/reconciliations/{rec_id}/review")
+def review_reconciliation(rec_id: int, review: ReviewRequest, db: Session = Depends(get_db)):
+    """Human-in-the-Loop review: Approve, Reject, or Escalate with justification."""
     rec = db.query(ReconciliationRecord).filter(ReconciliationRecord.id == rec_id).first()
     if not rec:
         raise HTTPException(status_code=404, detail="Reconciliation record not found")
@@ -245,7 +302,7 @@ def review_reconciliation(
         db,
         event_type=f"HUMAN_{review.action.upper()}",
         source=f"HUMAN_REVIEWER ({review.reviewer_name})",
-        description=f"Decision: {review.action.upper()}. Notes: {review.notes or 'None provided'}",
+        description=f"Decision: {review.action.upper()}. Notes: {review.notes or 'None'}",
         reconciliation_id=rec.id
     )
 
@@ -254,45 +311,7 @@ def review_reconciliation(
     return {"message": f"Reconciliation successfully updated to {rec.status}", "record": rec.to_dict()}
 
 
-@router.get("/dashboard/stats")
-def get_dashboard_metrics(db: Session = Depends(get_db)):
-    """Returns analytics KPIs and variance breakdowns for the dashboard."""
-    total = db.query(ReconciliationRecord).count()
-    matched = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "MATCHED").count()
-    approved = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "APPROVED").count()
-    variances = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "VARIANCE_DETECTED").count()
-    escalated = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "ESCALATED").count()
-    rejected = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "REJECTED").count()
-
-    total_variance_sum = sum(r.variance_total for r in db.query(ReconciliationRecord.variance_total).all())
-
-    # Vendor Health summary
-    vendors = db.query(VendorMemoryRecord).order_by(desc(VendorMemoryRecord.total_reconciliations)).limit(5).all()
-
-    return {
-        "total_processed": total,
-        "matched_count": matched,
-        "approved_count": approved,
-        "variance_count": variances,
-        "escalated_count": escalated,
-        "rejected_count": rejected,
-        "match_rate_pct": round((matched / total * 100), 1) if total > 0 else 0.0,
-        "total_variance_amount": round(total_variance_sum, 2),
-        "top_vendors": [v.to_dict() for v in vendors]
-    }
-
-
-@router.get("/audit-logs")
-def get_audit_trail(
-    limit: int = 50,
-    db: Session = Depends(get_db)
-):
-    """Retrieves immutable audit logs."""
-    logs = db.query(AuditLogEntry).order_by(desc(AuditLogEntry.timestamp)).limit(limit).all()
-    return [l.to_dict() for l in logs]
-
-
-@router.get("/export/{rec_id}")
+@app.get("/api/export/{rec_id}")
 def export_reconciliation_csv(rec_id: int, db: Session = Depends(get_db)):
     """Exports reconciliation line items and variances as a CSV report."""
     rec = db.query(ReconciliationRecord).filter(ReconciliationRecord.id == rec_id).first()
@@ -335,14 +354,20 @@ def export_reconciliation_csv(rec_id: int, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/demo/{scenario_type}")
+@app.get("/api/audit-logs")
+def get_audit_trail(limit: int = 50, db: Session = Depends(get_db)):
+    """Retrieves immutable audit logs."""
+    logs = db.query(AuditLogEntry).order_by(desc(AuditLogEntry.timestamp)).limit(limit).all()
+    return [l.to_dict() for l in logs]
+
+
+@app.post("/api/demo/{scenario_type}")
 def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
     """
-    1-Click Demo Loader: Runs real 3-way matching on realistic business cases.
-    Scenarios:
+    1-Click Demo Scenarios:
     - clean_match: Perfect 3-way match (100 laptops @ Rs 50,000)
-    - price_mismatch: Invoiced Rs 550 vs PO Rs 500 (from Page 4/15 in PDF)
-    - quantity_shortage: Invoiced 100 vs GRN 90 delivered (from Page 4/15 in PDF)
+    - price_mismatch: Invoiced Rs 550 vs PO Rs 500
+    - quantity_shortage: Invoiced 100 vs GRN 90 delivered
     - vendor_alias: ABC Technologies Private Limited vs ABC Technologies Pvt. Ltd.
     """
     session_id = str(uuid.uuid4())[:8]
@@ -387,9 +412,7 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
                 LineItemSchema(item_code="LAP-DELL-5420", description="Dell Latitude 5420 Laptops", quantity=100.0, unit_price=0.0, total_price=0.0)
             ]
         )
-
     elif scenario_type == "price_mismatch":
-        # Exactly Scenario 1 from the PDF guide!
         invoice = DocumentDataSchema(
             document_type="invoice",
             vendor_name="TechMatrix Solutions Ltd",
@@ -429,9 +452,7 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
                 LineItemSchema(item_code="MON-24-IPS", description="24-inch IPS UltraSharp Monitors", quantity=100.0, unit_price=0.0, total_price=0.0)
             ]
         )
-
     elif scenario_type == "quantity_shortage":
-        # Exactly Scenario 4/Example from the PDF: Invoiced 100, delivered 90!
         invoice = DocumentDataSchema(
             document_type="invoice",
             vendor_name="Apex Global Hardware",
@@ -471,9 +492,7 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
                 LineItemSchema(item_code="RAM-16GB-DDR4", description="16GB DDR4 Server Memory Modules", quantity=90.0, unit_price=0.0, total_price=0.0)
             ]
         )
-
     else:
-        # Vendor alias scenario
         invoice = DocumentDataSchema(
             document_type="invoice",
             vendor_name="CloudNet Infra Pvt. Ltd.",
@@ -569,11 +588,21 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
         db,
         event_type="DEMO_SCENARIO_LOADED",
         source="SYSTEM_DEMO_LOADER",
-        description=f"Loaded sample scenario '{scenario_type}' for testing ({rec_code})",
+        description=f"Loaded test scenario '{scenario_type}' ({rec_code})",
         reconciliation_id=reconciliation.id
     )
 
     db.commit()
     db.refresh(reconciliation)
-
     return reconciliation.to_dict()
+
+
+# ==========================================================
+# Server Runner (Supports Render $PORT & Local)
+# ==========================================================
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Starting CacheFlow AI on port {port}...")
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)

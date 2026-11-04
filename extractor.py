@@ -1,8 +1,13 @@
+import os
 import re
 import json
 from typing import Optional
-from app.core.config import settings
-from app.schemas.schemas import DocumentDataSchema, LineItemSchema
+import fitz  # PyMuPDF
+
+from models import DocumentDataSchema, LineItemSchema
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL_EXTRACTION", "gemini-1.5-flash")
 
 EXTRACTION_SYSTEM_PROMPT = """
 You are an expert financial Document Extraction Agent specialized in Accounts Payable (AP).
@@ -36,29 +41,71 @@ Rules:
 - Return null or default if a field is not found.
 """
 
+
+def extract_text_from_file(file_path: str) -> str:
+    """
+    Extracts text from PDF or text files using PyMuPDF.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".txt":
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read().strip()
+
+    if ext == ".pdf":
+        extracted_pages = []
+        try:
+            with fitz.open(file_path) as doc:
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    text = page.get_text("text").strip()
+                    if text:
+                        extracted_pages.append(text)
+            
+            combined_text = "\n\n--- Page Break ---\n\n".join(extracted_pages).strip()
+            if combined_text:
+                return combined_text
+        except Exception as e:
+            print(f"[OCR Warning] PyMuPDF extraction issue: {e}")
+
+    # Fallback for images if pytesseract and PIL exist
+    try:
+        import pytesseract
+        from PIL import Image
+        if ext in [".png", ".jpg", ".jpeg"]:
+            img = Image.open(file_path)
+            return pytesseract.image_to_string(img).strip()
+    except Exception:
+        pass
+
+    return "Document content could not be parsed as selectable text."
+
+
 def extract_with_gemini(raw_text: str, doc_hint: str = "document") -> Optional[DocumentDataSchema]:
     """Attempts structured JSON extraction using Google Gemini."""
-    if not settings.GEMINI_API_KEY or len(settings.GEMINI_API_KEY.strip()) < 8:
+    if not GEMINI_API_KEY or len(GEMINI_API_KEY.strip()) < 8:
         return None
 
     try:
         import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL_EXTRACTION)
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
 
         prompt = f"{EXTRACTION_SYSTEM_PROMPT}\n\nDocument Hint: {doc_hint}\n\nDocument Raw Text:\n{raw_text}"
         response = model.generate_content(prompt)
         text = response.text.strip()
-        
-        # Clean markdown code blocks if any
+
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
-        
+
         parsed_json = json.loads(text.strip())
         return DocumentDataSchema.model_validate(parsed_json)
     except Exception as e:
-        print(f"[Gemini Extraction Notice] Fallback to deterministic parser: {e}")
+        print(f"[Gemini Extraction] Fallback to heuristic parser: {e}")
         return None
 
 
@@ -68,7 +115,7 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
     Used as an ultra-fast, 100% reliable local fallback when Gemini is offline or not configured.
     """
     text_lower = raw_text.lower()
-    
+
     # 1. Determine Document Type
     doc_type = doc_hint.lower()
     if "goods receipt" in text_lower or "grn" in text_lower or "delivery note" in text_lower:
@@ -80,14 +127,13 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
 
     # 2. Extract Document Number
     doc_number = ""
-    doc_num_match = re.search(r"(?:invoice|po|grn|order|doc|receipt)\s*(?:no|number|#)?[:\s]+([A-Z0-9\-_/]+)", raw_text, re.IGNORECASE)
-    if doc_num_match:
-        doc_number = doc_num_match.group(1).strip()
+    code_match = re.search(r"\b((?:INV|PO|GRN)[-_#\s]*\d[A-Z0-9\-_/]*)\b", raw_text, re.IGNORECASE)
+    if code_match:
+        doc_number = code_match.group(1).upper()
     else:
-        # Fallback regex for standard codes
-        code_match = re.search(r"\b(INV-\d+|PO-\d+|GRN-\d+)\b", raw_text, re.IGNORECASE)
-        if code_match:
-            doc_number = code_match.group(1)
+        doc_num_match = re.search(r"(?:invoice|po|grn|order|doc|receipt)\s*(?:no|number|#)[:\s]+([A-Za-z0-9\-_/]+)", raw_text, re.IGNORECASE)
+        if doc_num_match:
+            doc_number = doc_num_match.group(1).strip()
         else:
             doc_number = f"{doc_type.upper()}-AUTO"
 
@@ -99,7 +145,6 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
         if len(clean_v) > 2:
             vendor_name = clean_v
     else:
-        # Try finding line before address
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
         for line in lines[:5]:
             if any(term in line.lower() for term in ["technologies", "solutions", "supplies", "enterprises", "corp", "pvt", "ltd", "inc"]):
@@ -113,7 +158,7 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
     elif "€" in raw_text or "EUR" in raw_text:
         currency = "EUR"
 
-    # 5. Extract Totals (Tax, Subtotal, Grand Total)
+    # 5. Extract Totals
     def find_amount(keywords: list[str]) -> float:
         for kw in keywords:
             m = re.search(rf"{kw}[:\s]+(?:[A-Z$₹€\s]*)?([\d,]+(?:\.\d{{1,2}})?)", raw_text, re.IGNORECASE)
@@ -130,9 +175,6 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
 
     # 6. Extract Line Items
     line_items: list[LineItemSchema] = []
-    
-    # Check for table rows like: ITEM001 Laptop 10 50000 500000
-    # or ITEM001, 10, 500
     item_rows = re.findall(
         r"([A-Z0-9\-_]{3,12})\s+([A-Za-z0-9\s\-_]+?)\s+(\d+(?:\.\d+)?)\s+(?:(?:[₹$€]\s*)?([\d,]+(?:\.\d+)?)\s+)?(?:(?:[₹$€]\s*)?([\d,]+(?:\.\d+)?))",
         raw_text
@@ -155,7 +197,6 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
         except ValueError:
             continue
 
-    # Fallback default item if none parsed from text
     if not line_items:
         line_items.append(LineItemSchema(
             item_code="ITEM-001",
@@ -184,7 +225,7 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
 
 
 def extract_document(raw_text: str, doc_hint: str = "document") -> DocumentDataSchema:
-    """Unified Extraction Agent entry point with graceful fallback."""
+    """Unified Extraction Agent entry point: Gemini first, graceful heuristic fallback."""
     extracted = extract_with_gemini(raw_text, doc_hint)
     if extracted is not None:
         return extracted

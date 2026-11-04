@@ -1,15 +1,13 @@
 version: '3.8'
 
 services:
-  cacheflow:
+  web:
     build: .
-    container_name: cacheflow_app
     ports:
       - "8000:8000"
     environment:
+      - PORT=8000
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - DATABASE_URL=sqlite:////app/cacheflow.db
     volumes:
-      - ./uploads:/app/uploads
       - ./cacheflow.db:/app/cacheflow.db
-    restart: unless-stopped
+      - ./uploads:/app/uploads

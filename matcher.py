@@ -1,15 +1,19 @@
 import re
 from difflib import SequenceMatcher
-from app.core.config import settings
-from app.schemas.schemas import (
+
+from models import (
+    AMOUNT_TOLERANCE,
+    TAX_TOLERANCE,
+    PRICE_TOLERANCE,
     DocumentDataSchema,
     ThreeWayMatchResult,
     VarianceItem,
     LineItemComparisonResult
 )
 
+
 def normalize_vendor_name(name: str) -> str:
-    """Removes common corporate legal suffixes and cleans whitespace."""
+    """Removes corporate legal suffixes and cleans whitespace for reliable alias matching."""
     if not name:
         return ""
     cleaned = name.lower()
@@ -25,11 +29,11 @@ def normalize_vendor_name(name: str) -> str:
 
 
 def are_vendors_matching(v1: str, v2: str) -> bool:
-    """Checks vendor equivalence using normalisation and fuzzy string similarity."""
+    """Checks vendor equivalence using normalization and fuzzy string similarity."""
     n1 = normalize_vendor_name(v1)
     n2 = normalize_vendor_name(v2)
     if not n1 or not n2:
-        return True # Default to pass if vendor not specified in GRN
+        return True
     if n1 == n2:
         return True
     similarity = SequenceMatcher(None, n1, n2).ratio()
@@ -42,13 +46,13 @@ def perform_three_way_reconciliation(
     grn: DocumentDataSchema
 ) -> ThreeWayMatchResult:
     """
-    Deterministic 3-Way Matching Engine:
+    Node 2: Deterministic 3-Way Matching Engine:
     Compares Invoice vs Purchase Order (PO) vs Goods Receipt Note (GRN).
-    Adheres strictly to financial validation rules with tolerance.
+    Enforces financial rules strictly with configured tolerances.
     """
     variances: list[VarianceItem] = []
     line_comparisons: list[LineItemComparisonResult] = []
-    
+
     # 1. Vendor Match Check
     vendor_matched = are_vendors_matching(invoice.vendor_name, po.vendor_name)
     if not vendor_matched:
@@ -60,9 +64,9 @@ def perform_three_way_reconciliation(
             message=f"Vendor mismatch: Invoice shows '{invoice.vendor_name}' while PO states '{po.vendor_name}'"
         ))
 
-    # 2. Grand Total Match Check (with tolerance)
+    # 2. Grand Total Match Check
     total_diff = round(invoice.total_amount - po.total_amount, 2)
-    if abs(total_diff) > settings.AMOUNT_TOLERANCE:
+    if abs(total_diff) > AMOUNT_TOLERANCE:
         variances.append(VarianceItem(
             field="total_amount",
             invoice_val=invoice.total_amount,
@@ -71,9 +75,9 @@ def perform_three_way_reconciliation(
             message=f"Total amount variance: Invoice is {invoice.currency} {invoice.total_amount:,.2f} vs PO agreed {invoice.currency} {po.total_amount:,.2f} (Diff: {total_diff:+,.2f})"
         ))
 
-    # 3. Tax Match Check (with tolerance)
+    # 3. Tax Match Check
     tax_diff = round(invoice.tax - po.tax, 2)
-    if abs(tax_diff) > settings.TAX_TOLERANCE:
+    if abs(tax_diff) > TAX_TOLERANCE:
         variances.append(VarianceItem(
             field="tax",
             invoice_val=invoice.tax,
@@ -82,23 +86,19 @@ def perform_three_way_reconciliation(
             message=f"Tax variance: Invoice tax is {invoice.currency} {invoice.tax:,.2f} vs PO tax {invoice.currency} {po.tax:,.2f} (Diff: {tax_diff:+,.2f})"
         ))
 
-    # 4. Line Items Three-Way Alignment
-    # Build lookups for PO and GRN line items by item_code
+    # 4. Line Items Alignment
     po_items_map = {item.item_code.upper(): item for item in po.line_items}
     grn_items_map = {item.item_code.upper(): item for item in grn.line_items}
 
-    # Also build fallback description-based lookups
     def find_matching_item(code: str, desc: str, items_map: dict):
         code_upper = code.upper()
         if code_upper in items_map:
             return items_map[code_upper]
-        # Match by description fuzzy if code differs
         for k, v in items_map.items():
             if desc and v.description and SequenceMatcher(None, desc.lower(), v.description.lower()).ratio() > 0.8:
                 return v
         return None
 
-    # Track evaluated items
     all_invoice_codes = set()
     total_line_variance = 0.0
 
@@ -119,7 +119,7 @@ def perform_three_way_reconciliation(
         grn_match = find_matching_item(code, desc, grn_items_map)
         grn_qty = grn_match.quantity if grn_match else None
 
-        # Determine Price Status
+        # Price Check
         price_status = "MATCH"
         if po_match is None:
             price_status = "MISSING_IN_PO"
@@ -132,7 +132,7 @@ def perform_three_way_reconciliation(
                 variance_amount=inv_line_tot,
                 message=f"Item {code} ({desc}) was invoiced but does not exist in Purchase Order {po.document_number}"
             ))
-        elif abs(inv_price - po_price) > settings.PRICE_TOLERANCE:
+        elif abs(inv_price - po_price) > PRICE_TOLERANCE:
             price_status = "MISMATCH"
             p_diff = round(inv_price - po_price, 2)
             variances.append(VarianceItem(
@@ -145,7 +145,7 @@ def perform_three_way_reconciliation(
                 message=f"Unit price mismatch for {code} ({desc}): Billed {invoice.currency} {inv_price:,.2f}/unit vs PO price {invoice.currency} {po_price:,.2f}/unit (Overbilled: {p_diff:+,.2f}/unit)"
             ))
 
-        # Determine Quantity Status (Invoice vs GRN)
+        # Quantity Check (Invoice vs GRN)
         qty_status = "MATCH"
         if grn_match is None:
             qty_status = "MISSING_IN_GRN"
@@ -172,7 +172,6 @@ def perform_three_way_reconciliation(
                     message=f"Quantity discrepancy for {code} ({desc}): Invoiced for {inv_qty} units, but warehouse GRN verified delivery of only {grn_qty} units (Shortfall: {q_diff} units)"
                 ))
 
-        # Calculate Line Variance
         expected_line_cost = (grn_qty if grn_qty is not None else 0.0) * (po_price if po_price is not None else inv_price)
         line_variance = max(0.0, round(inv_line_tot - expected_line_cost, 2)) if (price_status != "MATCH" or qty_status != "MATCH") else 0.0
         total_line_variance += line_variance
@@ -194,24 +193,20 @@ def perform_three_way_reconciliation(
             status=line_status
         ))
 
-    # Overall Match Scoring
-    total_checks = 5
+    # Calculate match score 0 - 100%
     passed_checks = 0
     if vendor_matched: passed_checks += 1
-    if abs(total_diff) <= settings.AMOUNT_TOLERANCE: passed_checks += 1
-    if abs(tax_diff) <= settings.TAX_TOLERANCE: passed_checks += 1
-    
+    if abs(total_diff) <= AMOUNT_TOLERANCE: passed_checks += 1
+    if abs(tax_diff) <= TAX_TOLERANCE: passed_checks += 1
+
     qty_matches = sum(1 for l in line_comparisons if l.qty_status == "MATCH")
     price_matches = sum(1 for l in line_comparisons if l.price_status == "MATCH")
     total_lines = max(1, len(line_comparisons))
 
-    line_qty_ratio = qty_matches / total_lines
-    line_price_ratio = price_matches / total_lines
-
     match_score = round(
         ((passed_checks / 3.0) * 50.0) +
-        (line_qty_ratio * 25.0) +
-        (line_price_ratio * 25.0),
+        ((qty_matches / total_lines) * 25.0) +
+        ((price_matches / total_lines) * 25.0),
         1
     )
 

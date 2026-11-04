@@ -1,12 +1,16 @@
+import os
 import re
 import json
 from typing import Optional
-from app.core.config import settings
-from app.schemas.schemas import (
+
+from models import (
     ThreeWayMatchResult,
     DocumentDataSchema,
     ArbitrationResponse
 )
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL_ARBITRATION", "gemini-1.5-flash")
 
 ARBITRATION_PROMPT = """
 You are the Accounts Payable AI Arbitration Agent for CacheFlow.
@@ -33,20 +37,21 @@ Rules:
 }
 """
 
+
 def arbitrate_with_gemini(
     match_result: ThreeWayMatchResult,
     invoice: DocumentDataSchema,
     po: DocumentDataSchema,
     grn: DocumentDataSchema
 ) -> Optional[ArbitrationResponse]:
-    """Uses Google Gemini Pro/Flash to generate explainable arbitration rationale."""
-    if not settings.GEMINI_API_KEY or len(settings.GEMINI_API_KEY.strip()) < 8:
+    """Uses Google Gemini to generate explainable arbitration rationale and vendor dispute email."""
+    if not GEMINI_API_KEY or len(GEMINI_API_KEY.strip()) < 8:
         return None
 
     try:
         import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL_ARBITRATION)
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
 
         context_data = {
             "invoice": invoice.model_dump(),
@@ -66,7 +71,7 @@ def arbitrate_with_gemini(
         parsed = json.loads(text.strip())
         return ArbitrationResponse.model_validate(parsed)
     except Exception as e:
-        print(f"[Arbitration Notice] Falling back to deterministic agent: {e}")
+        print(f"[Gemini Arbitration] Falling back to deterministic agent: {e}")
         return None
 
 
@@ -87,14 +92,17 @@ def arbitrate_deterministic(
             summary=f"Three-way reconciliation succeeded. All quantities, unit rates, and totals on Invoice #{invoice.document_number} match PO #{po.document_number} and Goods Receipt #{grn.document_number}.",
             recommended_action="AUTO_APPROVE",
             dispute_email_draft="No dispute required. Invoice verified for payment authorization.",
-            findings=["Invoice line items match PO unit prices.", "Warehouse GRN confirms full receipt of invoiced goods.", "Tax calculation and totals align within tolerance."]
+            findings=[
+                "Invoice line items match PO unit prices.",
+                "Warehouse GRN confirms full receipt of invoiced goods.",
+                "Tax calculation and totals align within tolerance."
+            ]
         )
 
-    # Discrepancies present
     findings = []
     risk = "MEDIUM"
     action = "ESCALATE_TO_VENDOR"
-    
+
     if match_result.variance_total > 50000:
         risk = "CRITICAL"
         action = "REJECT_INVOICE"
@@ -105,7 +113,6 @@ def arbitrate_deterministic(
     for var in match_result.variances:
         findings.append(var.message)
 
-    # Generate professional vendor communication citing exact documents
     variance_bullet_points = "\n".join([f"  - {f}" for f in findings])
     email_draft = f"""Subject: Discrepancy Notification for Invoice #{invoice.document_number} (Ref: PO #{po.document_number})
 
@@ -145,7 +152,7 @@ def arbitrate_exceptions(
     po: DocumentDataSchema,
     grn: DocumentDataSchema
 ) -> ArbitrationResponse:
-    """Unified Arbitration Agent entry point with graceful fallback."""
+    """Unified Arbitration Agent entry point: Gemini first, deterministic fallback."""
     ai_result = arbitrate_with_gemini(match_result, invoice, po, grn)
     if ai_result is not None:
         return ai_result
