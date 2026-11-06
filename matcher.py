@@ -11,9 +11,11 @@ from models import (
     LineItemComparisonResult
 )
 
-
+# ==========================================================
+# 1. Vendor Name Normalization (Legal Suffix Cleaning)
+# ==========================================================
 def normalize_vendor_name(name: str) -> str:
-    """Removes corporate legal suffixes and cleans whitespace for reliable alias matching."""
+    """Company legal suffixes ('Pvt Ltd', 'Private Limited', etc.) ko saaf karta hai."""
     if not name:
         return ""
     cleaned = name.lower()
@@ -26,34 +28,47 @@ def normalize_vendor_name(name: str) -> str:
         cleaned = re.sub(rf"\b{re.escape(s)}\b", "", cleaned)
     cleaned = re.sub(r"[^\w\s]", "", cleaned)
     return " ".join(cleaned.split())
+# Comment: Agar Invoice me 'ABC Technologies Private Limited' likha ho aur PO me 'ABC Technologies Pvt. Ltd.', toh yeh function dono ko 'abc technologies' bana deta hai taaki false mismatch na ho.
 
 
+# ==========================================================
+# 2. Vendor Equivalence Matching (Fuzzy String Similarity)
+# ==========================================================
 def are_vendors_matching(v1: str, v2: str) -> bool:
-    """Checks vendor equivalence using normalization and fuzzy string similarity."""
+    """Normalized naam aur fuzzy string ratio use karke check karta hai ki dono vendors ek hi hain ya alag."""
     n1 = normalize_vendor_name(v1)
     n2 = normalize_vendor_name(v2)
+    # Agar kisi document me vendor blank ho toh safe pass karte hain
     if not n1 or not n2:
         return True
+    # Exact match check
     if n1 == n2:
         return True
+    # Fuzzy similarity check (85% se zyada similarity ko valid match maana jata hai)
     similarity = SequenceMatcher(None, n1, n2).ratio()
     return similarity >= 0.85
+# Comment: 85% threshold rakhne se minor spelling mistake ya abbreviation ki wajah se payment nahi rukti.
 
 
+# ==========================================================
+# 3. Deterministic 3-Way Matching Engine (Zero-Hallucination Math)
+# ==========================================================
 def perform_three_way_reconciliation(
     invoice: DocumentDataSchema,
     po: DocumentDataSchema,
     grn: DocumentDataSchema
 ) -> ThreeWayMatchResult:
     """
-    Node 2: Deterministic 3-Way Matching Engine:
-    Compares Invoice vs Purchase Order (PO) vs Goods Receipt Note (GRN).
-    Enforces financial rules strictly with configured tolerances.
+    Node 2: 3-Way Reconciliation Engine:
+    Invoice vs Purchase Order (PO) vs Goods Receipt Note (GRN) ko compare karta hai.
+    Strict financial validation rules enforce karta hai.
     """
     variances: list[VarianceItem] = []
     line_comparisons: list[LineItemComparisonResult] = []
 
-    # 1. Vendor Match Check
+    # ----------------------------------------------------
+    # Check 1: Vendor Match Check (Vendor ka naam verify karo)
+    # ----------------------------------------------------
     vendor_matched = are_vendors_matching(invoice.vendor_name, po.vendor_name)
     if not vendor_matched:
         variances.append(VarianceItem(
@@ -63,8 +78,11 @@ def perform_three_way_reconciliation(
             variance_amount=0.0,
             message=f"Vendor mismatch: Invoice shows '{invoice.vendor_name}' while PO states '{po.vendor_name}'"
         ))
+    # Comment: Yeh ensure karta hai ki jis vendor ko humne order diya tha, bill bhi usi vendor ka ho, kisi third-party ka nahi.
 
-    # 2. Grand Total Match Check
+    # ----------------------------------------------------
+    # Check 2: Grand Total Match Check (Total Amount Verify karo)
+    # ----------------------------------------------------
     total_diff = round(invoice.total_amount - po.total_amount, 2)
     if abs(total_diff) > AMOUNT_TOLERANCE:
         variances.append(VarianceItem(
@@ -74,8 +92,11 @@ def perform_three_way_reconciliation(
             variance_amount=abs(total_diff),
             message=f"Total amount variance: Invoice is {invoice.currency} {invoice.total_amount:,.2f} vs PO agreed {invoice.currency} {po.total_amount:,.2f} (Diff: {total_diff:+,.2f})"
         ))
+    # Comment: Agar Invoice ka final amount PO ke total se zyada ho (tolerance ke bahar), toh variance report me add ho jata hai.
 
-    # 3. Tax Match Check
+    # ----------------------------------------------------
+    # Check 3: Tax Match Check (GST / Tax Verification)
+    # ----------------------------------------------------
     tax_diff = round(invoice.tax - po.tax, 2)
     if abs(tax_diff) > TAX_TOLERANCE:
         variances.append(VarianceItem(
@@ -85,8 +106,12 @@ def perform_three_way_reconciliation(
             variance_amount=abs(tax_diff),
             message=f"Tax variance: Invoice tax is {invoice.currency} {invoice.tax:,.2f} vs PO tax {invoice.currency} {po.tax:,.2f} (Diff: {tax_diff:+,.2f})"
         ))
+    # Comment: Yeh check karta hai ki tax calculation me koi galti ya extra charges toh nahi lagaye gaye.
 
-    # 4. Line Items Alignment
+    # ----------------------------------------------------
+    # Check 4: Line Items Alignment (3-Way Items Verification)
+    # ----------------------------------------------------
+    # PO aur GRN line items ke lookups banate hain item_code se
     po_items_map = {item.item_code.upper(): item for item in po.line_items}
     grn_items_map = {item.item_code.upper(): item for item in grn.line_items}
 
@@ -94,6 +119,7 @@ def perform_three_way_reconciliation(
         code_upper = code.upper()
         if code_upper in items_map:
             return items_map[code_upper]
+        # Agar code match na ho toh description se fuzzy match try karo
         for k, v in items_map.items():
             if desc and v.description and SequenceMatcher(None, desc.lower(), v.description.lower()).ratio() > 0.8:
                 return v
@@ -102,6 +128,7 @@ def perform_three_way_reconciliation(
     all_invoice_codes = set()
     total_line_variance = 0.0
 
+    # Invoice ke har line item ko PO aur GRN ke sath cross-verify karo
     for inv_item in invoice.line_items:
         code = inv_item.item_code
         all_invoice_codes.add(code.upper())
@@ -110,16 +137,16 @@ def perform_three_way_reconciliation(
         inv_price = inv_item.unit_price
         inv_line_tot = inv_item.total_price or (inv_qty * inv_price)
 
-        # Match with PO
+        # 4a. PO se rate match karo (Unit Price Check)
         po_match = find_matching_item(code, desc, po_items_map)
         po_price = po_match.unit_price if po_match else None
         po_line_tot = (inv_qty * po_price) if po_price is not None else 0.0
 
-        # Match with GRN
+        # 4b. GRN se delivered quantity match karo (Quantity Check)
         grn_match = find_matching_item(code, desc, grn_items_map)
         grn_qty = grn_match.quantity if grn_match else None
 
-        # Price Check
+        # Unit Price status decide karo
         price_status = "MATCH"
         if po_match is None:
             price_status = "MISSING_IN_PO"
@@ -145,7 +172,7 @@ def perform_three_way_reconciliation(
                 message=f"Unit price mismatch for {code} ({desc}): Billed {invoice.currency} {inv_price:,.2f}/unit vs PO price {invoice.currency} {po_price:,.2f}/unit (Overbilled: {p_diff:+,.2f}/unit)"
             ))
 
-        # Quantity Check (Invoice vs GRN)
+        # Quantity delivered status decide karo (Invoice vs GRN)
         qty_status = "MATCH"
         if grn_match is None:
             qty_status = "MISSING_IN_GRN"
@@ -172,6 +199,7 @@ def perform_three_way_reconciliation(
                     message=f"Quantity discrepancy for {code} ({desc}): Invoiced for {inv_qty} units, but warehouse GRN verified delivery of only {grn_qty} units (Shortfall: {q_diff} units)"
                 ))
 
+        # Variance amount calculate karo
         expected_line_cost = (grn_qty if grn_qty is not None else 0.0) * (po_price if po_price is not None else inv_price)
         line_variance = max(0.0, round(inv_line_tot - expected_line_cost, 2)) if (price_status != "MATCH" or qty_status != "MATCH") else 0.0
         total_line_variance += line_variance
@@ -192,8 +220,11 @@ def perform_three_way_reconciliation(
             variance_amount=line_variance,
             status=line_status
         ))
+    # Comment: Yeh poore system ka sabse critical core loop hai. Yahan decide hota hai ki vendor ne kitna extra charge kiya ya warehouse me kitna maal kam pahuncha.
 
-    # Calculate match score 0 - 100%
+    # ----------------------------------------------------
+    # Match Scoring & Final Status (Match Score Calculation 0 - 100%)
+    # ----------------------------------------------------
     passed_checks = 0
     if vendor_matched: passed_checks += 1
     if abs(total_diff) <= AMOUNT_TOLERANCE: passed_checks += 1
@@ -226,3 +257,4 @@ def perform_three_way_reconciliation(
         variances=variances,
         line_comparisons=line_comparisons
     )
+# Comment: Final reconciliation report taiyyar karke return karta hai. Agar koi variance nahi hai toh status 'MATCHED' aur score 100% hota hai.

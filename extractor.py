@@ -2,12 +2,17 @@ import os
 import re
 import json
 from typing import Optional
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF library: digital PDFs se text fast extract karne ke liye
 
 from models import DocumentDataSchema, LineItemSchema
 
+# ==========================================================
+# Gemini AI Configuration (Google LLM Setup)
+# ==========================================================
+# Environment se Gemini API key aur model ka naam uthate hain.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL_EXTRACTION", "gemini-1.5-flash")
+# Comment: Agar user ne API key set ki hai toh Gemini Flash model use hoga, nahi toh offline heuristic engine run hoga.
 
 EXTRACTION_SYSTEM_PROMPT = """
 You are an expert financial Document Extraction Agent specialized in Accounts Payable (AP).
@@ -40,21 +45,27 @@ Rules:
 - If document is Goods Receipt Note (GRN), unit_price and tax may be 0.0, but quantities must be exact.
 - Return null or default if a field is not found.
 """
+# Comment: Yeh AI ko di jaane wali strict instructions hain ki response me koi faltu text ya markdown nahi aana chahiye, sirf clean JSON hona chahiye.
 
 
+# ==========================================================
+# 1. Raw Text Extraction (File se Text Nikalna)
+# ==========================================================
 def extract_text_from_file(file_path: str) -> str:
     """
-    Extracts text from PDF or text files using PyMuPDF.
+    PDF ya Text file se selectable text extract karta hai using PyMuPDF (fitz).
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
     ext = os.path.splitext(file_path)[1].lower()
 
+    # Agar simple text (.txt) file hai toh direct read karo
     if ext == ".txt":
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read().strip()
 
+    # Agar PDF (.pdf) file hai toh PyMuPDF (fitz) se page by page text extract karo
     if ext == ".pdf":
         extracted_pages = []
         try:
@@ -71,7 +82,7 @@ def extract_text_from_file(file_path: str) -> str:
         except Exception as e:
             print(f"[OCR Warning] PyMuPDF extraction issue: {e}")
 
-    # Fallback for images if pytesseract and PIL exist
+    # Fallback: Agar image file (.png, .jpg) ho toh pytesseract use karne ki koshish karo
     try:
         import pytesseract
         from PIL import Image
@@ -82,10 +93,15 @@ def extract_text_from_file(file_path: str) -> str:
         pass
 
     return "Document content could not be parsed as selectable text."
+# Comment: Yeh function uploaded document ka poora text nikal kar raw string me convert kar deta hai taaki parser usko padh sake.
 
 
+# ==========================================================
+# 2. AI Extraction via Gemini (LLM Mode)
+# ==========================================================
 def extract_with_gemini(raw_text: str, doc_hint: str = "document") -> Optional[DocumentDataSchema]:
-    """Attempts structured JSON extraction using Google Gemini."""
+    """Google Gemini LLM use karke raw text se structured JSON extract karta hai."""
+    # Agar API key nahi hai ya bohot chhoti hai toh direct None return karo (offline fallback chalega)
     if not GEMINI_API_KEY or len(GEMINI_API_KEY.strip()) < 8:
         return None
 
@@ -98,6 +114,7 @@ def extract_with_gemini(raw_text: str, doc_hint: str = "document") -> Optional[D
         response = model.generate_content(prompt)
         text = response.text.strip()
 
+        # Agar model ne ```json ... ``` markdown block diya ho toh use saaf karo
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
@@ -107,16 +124,20 @@ def extract_with_gemini(raw_text: str, doc_hint: str = "document") -> Optional[D
     except Exception as e:
         print(f"[Gemini Extraction] Fallback to heuristic parser: {e}")
         return None
+# Comment: Agar internet ya Gemini API kaam kar raha hai toh yeh AI se perfect JSON format nikal leta hai. Agar koi error aati hai toh crash nahi hota, deterministic parser sambhal leta hai.
 
 
+# ==========================================================
+# 3. Deterministic Heuristic Extraction (100% Offline Safe Rule-based Engine)
+# ==========================================================
 def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> DocumentDataSchema:
     """
-    Deterministic rule-based / regex parser for financial documents.
-    Used as an ultra-fast, 100% reliable local fallback when Gemini is offline or not configured.
+    Regex aur rules par aadharit deterministic parser.
+    Yeh 100% offline kaam karta hai aur bina kisi AI ke exact financial fields nikalta hai.
     """
     text_lower = raw_text.lower()
 
-    # 1. Determine Document Type
+    # Step 1: Document Type pehchano (Invoice, PO ya GRN)
     doc_type = doc_hint.lower()
     if "goods receipt" in text_lower or "grn" in text_lower or "delivery note" in text_lower:
         doc_type = "grn"
@@ -124,8 +145,9 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
         doc_type = "purchase_order"
     elif "invoice" in text_lower or "bill to" in text_lower:
         doc_type = "invoice"
+    # Comment: Keywords scan karke decide hota hai ki yeh supplier ka invoice hai, purchase order hai ya warehouse ki GRN receipt hai.
 
-    # 2. Extract Document Number
+    # Step 2: Document Number dhoondho (Jaise INV-2026-101 ya PO-2026-101)
     doc_number = ""
     code_match = re.search(r"\b((?:INV|PO|GRN)[-_#\s]*\d[A-Z0-9\-_/]*)\b", raw_text, re.IGNORECASE)
     if code_match:
@@ -136,8 +158,9 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
             doc_number = doc_num_match.group(1).strip()
         else:
             doc_number = f"{doc_type.upper()}-AUTO"
+    # Comment: Yeh regex ensure karta hai ki 'INVOICE' jaise generic words na uthe, balki actual code jaise 'INV-2026-101' capture ho.
 
-    # 3. Extract Vendor Name
+    # Step 3: Vendor ka naam dhoondho
     vendor_name = "Global Supplies Ltd"
     vendor_match = re.search(r"(?:vendor|supplier|from|seller|company)[:\s]+([A-Za-z0-9\s.,&'-]+?)(?:\n|address|gst|tax)", raw_text, re.IGNORECASE)
     if vendor_match:
@@ -150,22 +173,25 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
             if any(term in line.lower() for term in ["technologies", "solutions", "supplies", "enterprises", "corp", "pvt", "ltd", "inc"]):
                 vendor_name = line
                 break
+    # Comment: Header me se vendor ka official naam nikalta hai (jaise 'ABC Technologies Private Limited').
 
-    # 4. Currency
+    # Step 4: Currency check karo
     currency = "INR"
     if "$" in raw_text or "USD" in raw_text:
         currency = "USD"
     elif "€" in raw_text or "EUR" in raw_text:
         currency = "EUR"
+    # Comment: Currency symbol scan karke default INR, USD ya EUR set karta hai.
 
-    # 5. Extract Totals (with support for Tax (18% GST), @ 18%, etc.)
+    # Step 5: Subtotal, Tax aur Total Amount nikalna
     def find_amount(keywords: list[str]) -> float:
         for kw in keywords:
+            # Yeh regex tax rate parentheses jaise Tax (18% GST): ko bhi accurately handle karta hai
             pattern = rf"\b{kw}\b(?:\s*\([^)]*\))?(?:\s*@\s*[\d.]+%|\s*rate\s*[\d.]+%)?[:\s]+(?:[A-Za-z$€\s]*)?([\d,]+(?:\.\d{{1,2}})?)"
             m = re.search(pattern, raw_text, re.IGNORECASE)
             if m:
                 try:
-                    return float(m.group(1).replace(',', ''))
+                    return float(m.group(1).replace(",", ""))
                 except ValueError:
                     pass
         return 0.0
@@ -173,10 +199,12 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
     total_amount = find_amount(["total amount", "grand total", "net payable", "invoice total", "order total", "total"])
     subtotal = find_amount(["subtotal", "sub total", "taxable value", "amount before tax"])
     tax = find_amount(["tax", "gst", "vat", "igst", "cgst"])
+    # Comment: Yahan subtotal, GST tax amount aur final invoice total extract hote hain.
 
-    # 6. Extract Line Items (handles pipe-delimited, tab-delimited, and space-delimited tables)
+    # Step 6: Line Items (Table rows) extract karna
     line_items: list[LineItemSchema] = []
 
+    # Pipe-separated table rows check karo (e.g. Code | Desc | Qty | Unit Price | Total)
     for raw_line in raw_text.splitlines():
         line = raw_line.strip()
         if not line or "---" in line:
@@ -185,7 +213,6 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
         if "item code" in lower_line or "description" in lower_line or "subtotal" in lower_line or "grand total" in lower_line:
             continue
 
-        # Check pipe-separated rows (e.g. Code | Desc | Qty | Unit Price | Total)
         if "|" in line:
             parts = [p.strip() for p in line.split("|")]
             if len(parts) >= 3:
@@ -218,7 +245,7 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
                     except ValueError:
                         pass
 
-    # Fallback to whitespace-delimited rows if no pipe rows were parsed
+    # Agar pipe rows nahi mile, toh space-separated rows scan karo
     if not line_items:
         item_rows = re.findall(
             r"([A-Z0-9\-_]{3,16})\s+([A-Za-z0-9\s\-_]+?)\s+(\d+(?:\.\d+)?)\s+(?:(?:[₹$€]\s*)?([\d,]+(?:\.\d+)?)\s+)?(?:(?:[₹$€]\s*)?([\d,]+(?:\.\d+)?))",
@@ -241,6 +268,7 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
             except ValueError:
                 continue
 
+    # Fallback row agar document me table row nahi mili
     if not line_items:
         line_items.append(LineItemSchema(
             item_code="ITEM-001",
@@ -266,11 +294,18 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
         total_amount=total_amount,
         line_items=line_items
     )
+# Comment: Yeh deterministic logic documents ko bina kisi external service ke instant parse kar deti hai.
 
 
+# ==========================================================
+# 4. Unified Extraction Entry Point (Main Function)
+# ==========================================================
 def extract_document(raw_text: str, doc_hint: str = "document") -> DocumentDataSchema:
-    """Unified Extraction Agent entry point: Gemini first, graceful heuristic fallback."""
+    """Unified Extraction Agent: Pehle Gemini AI try karta hai, fallback par heuristics chalata hai."""
+    # 1. Pehle Gemini AI try karo agar key configured hai
     extracted = extract_with_gemini(raw_text, doc_hint)
     if extracted is not None:
         return extracted
+    # 2. Agar AI offline hai ya error aaye, toh deterministic parser 100% guarantee ke sath result dega
     return extract_with_heuristics(raw_text, doc_hint)
+# Comment: Yeh Node 1 ka main gatekeeper hai. Best of both worlds: AI accuracy jab available ho, aur offline reliability jab internet na ho.

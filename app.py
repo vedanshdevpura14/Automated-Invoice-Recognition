@@ -18,6 +18,7 @@ from sqlalchemy import desc
 from models import (
     init_db,
     get_db,
+    get_ist_now,
     UPLOAD_DIR,
     ReconciliationRecord,
     ReconciliationLineItem,
@@ -33,18 +34,26 @@ from extractor import extract_text_from_file, extract_document
 from matcher import perform_three_way_reconciliation
 from agent import arbitrate_exceptions
 
+# Static frontend folder ka path
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+# ==========================================================
+# Application Lifespan (Startup & Shutdown Management)
+# ==========================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Ensure database tables are created
+    # App start hote hi database tables ko verify ya create karta hai
     init_db()
-    print("[CacheFlow AI] Database tables verified.")
+    print("[CacheFlow AI] Database tables verified with IST timestamp support.")
     yield
     print("[CacheFlow AI] Shutting down.")
+# Comment: Yeh lifespan manager ensure karta hai ki jab server boot ho, tabhi SQLite me saari tables ready ho jayein.
 
 
+# ==========================================================
+# FastAPI App Initialization & CORS Setup
+# ==========================================================
 app = FastAPI(
     title="CacheFlow AI - Automated Invoice Reconciliation",
     version="2.0.0",
@@ -60,26 +69,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve web dashboard static assets
+# Static frontend dashboard assets mount karo
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# Comment: CORS allow karne se local frontend aur deployment bina kisi security block ke seamlessly baat kar pate hain.
 
 
+# ==========================================================
+# Root Route: Web Dashboard UI Serving
+# ==========================================================
 @app.get("/", include_in_schema=False)
 def serve_index():
+    """Browser me main dashboard UI (index.html) serve karta hai."""
     index_file = STATIC_DIR / "index.html"
     if index_file.exists():
         return FileResponse(str(index_file))
     return {"message": "CacheFlow AI API is running. Open /docs for API documentation."}
+# Comment: Jab user browser me http://localhost:8000 kholta hai, toh yeh route index.html render kar deta hai.
 
 
 # ==========================================================
-# API Endpoints
+# API Endpoint 1: Health Check (/api/health)
 # ==========================================================
-
 @app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
-    """System health check endpoint."""
+    """System ki health, database connectivity aur Gemini AI mode check karta hai."""
     total_recs = db.query(ReconciliationRecord).count()
     has_gemini = bool(os.getenv("GEMINI_API_KEY") and len(os.getenv("GEMINI_API_KEY", "")) > 8)
     return {
@@ -88,14 +102,19 @@ def health_check(db: Session = Depends(get_db)):
         "database": "connected",
         "total_reconciliations_stored": total_recs,
         "gemini_api_configured": has_gemini,
+        "timezone": "IST (UTC+05:30)",
         "ai_extraction_mode": "Gemini 1.5 Flash" if has_gemini else "Deterministic Heuristics Engine (Offline Safe)",
         "ai_arbitration_mode": "Gemini 1.5 Flash/Pro" if has_gemini else "Deterministic Reasoner (Offline Safe)"
     }
+# Comment: Monitoring aur status checking ke liye endpoint hai, bata deta hai ki DB connected hai aur Gemini enabled hai ya offline engine chal raha hai.
 
 
+# ==========================================================
+# API Endpoint 2: Dashboard Metrics & KPIs (/api/dashboard/stats)
+# ==========================================================
 @app.get("/api/dashboard/stats")
 def get_dashboard_metrics(db: Session = Depends(get_db)):
-    """Returns analytics KPIs and variance breakdowns for the dashboard."""
+    """Dashboard ke upar ke summary cards (Total Processed, Clean Matches, Variances, Amounts) calculate karta hai."""
     total = db.query(ReconciliationRecord).count()
     matched = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "MATCHED").count()
     approved = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "APPROVED").count()
@@ -117,8 +136,12 @@ def get_dashboard_metrics(db: Session = Depends(get_db)):
         "total_variance_amount": round(total_variance_sum, 2),
         "top_vendors": [v.to_dict() for v in vendors]
     }
+# Comment: Frontend ke dashboard stats cards (Total runs, Clean matches, Risk amount) isi endpoint se live data uthate hain.
 
 
+# ==========================================================
+# API Endpoint 3: Historical Records List (/api/reconciliations)
+# ==========================================================
 @app.get("/api/reconciliations")
 def list_reconciliations(
     status: Optional[str] = None,
@@ -126,7 +149,7 @@ def list_reconciliations(
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
-    """Lists historical reconciliation records with optional status filtering."""
+    """Purane reconciliation records ki list return karta hai with pagination and status filter."""
     query = db.query(ReconciliationRecord)
     if status and status.upper() != "ALL":
         query = query.filter(ReconciliationRecord.status == status.upper())
@@ -134,22 +157,31 @@ def list_reconciliations(
     total = query.count()
     records = query.order_by(desc(ReconciliationRecord.created_at)).offset(offset).limit(limit).all()
     items = [r.to_dict() for r in records]
-    return {'items': items, 'total': total}
+    return {"items": items, "total": total}
+# Comment: Yeh table me sare records load karta hai. Refresh karne par yahi se sara saved data wapas screen par aa jata hai.
 
 
+# ==========================================================
+# API Endpoint 4: Single Record Detail (/api/reconciliations/{rec_id})
+# ==========================================================
 @app.get("/api/reconciliations/{rec_id}")
 def get_reconciliation_detail(rec_id: int, db: Session = Depends(get_db)):
-    """Retrieves full reconciliation audit record including line comparisons & logs."""
+    """Kisi specific reconciliation record ki poori detail (matrix + audit logs) fetch karta hai."""
     rec = db.query(ReconciliationRecord).filter(ReconciliationRecord.id == rec_id).first()
     if not rec:
         raise HTTPException(status_code=404, detail="Reconciliation record not found")
 
     data = rec.to_dict()
+    # Us record se jude audit logs bhi fetch karo
     logs = db.query(AuditLogEntry).filter(AuditLogEntry.reconciliation_id == rec_id).order_by(AuditLogEntry.timestamp).all()
     data["audit_logs"] = [l.to_dict() for l in logs]
     return data
+# Comment: Jab user kisi invoice par 'Inspect Matrix' click karta hai, toh yeh endpoint side-by-side line items aur dispute email return karta hai.
 
 
+# ==========================================================
+# API Endpoint 5: Document Upload & Main 3-Way Reconciliation Pipeline
+# ==========================================================
 @app.post("/api/upload-and-reconcile")
 async def upload_and_reconcile(
     invoice_file: UploadFile = File(...),
@@ -159,15 +191,16 @@ async def upload_and_reconcile(
 ):
     """
     Main 3-Way Reconciliation Pipeline:
-    1. Ingests Invoice, PO, and GRN documents
-    2. Node 1: Extraction Agent (PyMuPDF + Gemini / Heuristic Parser)
-    3. Node 2: Matching Agent (Deterministic 3-Way Match with tolerances)
-    4. Node 3: Arbitration Agent (AI Reasoner, Risk Scoring, Vendor Dispute Drafter)
-    5. Persistence in SQLite & Audit Log registration
+    1. Ingests 3 files (Invoice, PO, GRN)
+    2. Node 1: Extraction Agent (PyMuPDF + Gemini/Heuristics)
+    3. Node 2: Matching Agent (Deterministic 3-Way Check)
+    4. Node 3: AI Arbitration Agent (Risk Scoring & Dispute Email)
+    5. Database me IST timestamp ke sath persist karta hai
     """
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     session_id = str(uuid.uuid4())[:8]
 
+    # Step 1: Uploaded files ko validate aur save karo
     allowed_exts = [".pdf", ".png", ".jpg", ".jpeg", ".txt"]
     file_paths = {}
     for role, f in [("invoice", invoice_file), ("po", po_file), ("grn", grn_file)]:
@@ -182,6 +215,7 @@ async def upload_and_reconcile(
             out.write(content)
         file_paths[role] = dest_path
 
+    # Audit log me upload event record karo (IST time me)
     record_audit_log(
         db,
         event_type="DOCUMENT_UPLOAD",
@@ -189,7 +223,7 @@ async def upload_and_reconcile(
         description=f"Received 3 documents for batch: {invoice_file.filename}, {po_file.filename}, {grn_file.filename}"
     )
 
-    # Node 1: Extraction Agent
+    # Step 2: Node 1: Extraction Agent (Text parsing and JSON structuring)
     try:
         inv_text = extract_text_from_file(file_paths["invoice"])
         po_text = extract_text_from_file(file_paths["po"])
@@ -209,7 +243,7 @@ async def upload_and_reconcile(
         description=f"Extracted data for Invoice #{invoice_data.document_number}, PO #{po_data.document_number}, GRN #{grn_data.document_number}"
     )
 
-    # Node 2: Deterministic 3-Way Matching Engine
+    # Step 3: Node 2: Deterministic 3-Way Matching Engine
     match_result = perform_three_way_reconciliation(invoice_data, po_data, grn_data)
 
     record_audit_log(
@@ -220,12 +254,17 @@ async def upload_and_reconcile(
         severity="WARNING" if match_result.status != "MATCHED" else "INFO"
     )
 
-    # Node 3: AI Arbitration Agent
+    # Step 4: Node 3: AI Arbitration Agent (Dispute analysis & email drafting)
     arbitration = arbitrate_exceptions(match_result, invoice_data, po_data, grn_data)
 
-    rec_code = f"REC-{datetime.utcnow().strftime('%Y%m%d')}-{session_id.upper()}"
+    # Unique reconciliation tracking code with Indian date format (YYYYMMDD)
+    now_ist = get_ist_now()
+    rec_code = f"REC-{now_ist.strftime('%Y%m%d')}-{session_id.upper()}"
+
+    # Step 5: Master record ko database me save karo
     reconciliation = ReconciliationRecord(
         reconciliation_code=rec_code,
+        created_at=now_ist,
         vendor_name=invoice_data.vendor_name,
         invoice_number=invoice_data.document_number,
         po_number=po_data.document_number,
@@ -254,6 +293,7 @@ async def upload_and_reconcile(
     db.commit()
     db.refresh(reconciliation)
 
+    # Line items ko individual rows me save karo
     for item in match_result.line_comparisons:
         line_item = ReconciliationLineItem(
             reconciliation_id=reconciliation.id,
@@ -272,6 +312,7 @@ async def upload_and_reconcile(
         )
         db.add(line_item)
 
+    # Vendor memory update karo (vendor match history)
     update_vendor_memory(db, invoice_data.vendor_name, was_matched=(match_result.status == "MATCHED"))
 
     record_audit_log(
@@ -284,20 +325,23 @@ async def upload_and_reconcile(
 
     db.commit()
     db.refresh(reconciliation)
-
     return reconciliation.to_dict()
+# Comment: Yeh poora 3-Node pipeline ek request me run hota hai aur result return karta hai. User screen par instant matrix dekh sakta hai.
 
 
+# ==========================================================
+# API Endpoint 6: Human-in-the-Loop Review (/api/reconciliations/{rec_id}/review)
+# ==========================================================
 @app.post("/api/reconciliations/{rec_id}/review")
 def review_reconciliation(rec_id: int, review: ReviewRequest, db: Session = Depends(get_db)):
-    """Human-in-the-Loop review: Approve, Reject, or Escalate with justification."""
+    """Finance specialist ka manual sign-off (Approve, Reject ya Escalate) record karta hai."""
     rec = db.query(ReconciliationRecord).filter(ReconciliationRecord.id == rec_id).first()
     if not rec:
         raise HTTPException(status_code=404, detail="Reconciliation record not found")
 
     rec.reviewer_action = review.action.upper()
     rec.reviewer_notes = review.notes
-    rec.reviewed_at = datetime.utcnow()
+    rec.reviewed_at = get_ist_now() # Exact Indian Standard Time review stamp
     rec.status = review.action.upper()
 
     record_audit_log(
@@ -311,11 +355,15 @@ def review_reconciliation(rec_id: int, review: ReviewRequest, db: Session = Depe
     db.commit()
     db.refresh(rec)
     return {"message": f"Reconciliation successfully updated to {rec.status}", "record": rec.to_dict()}
+# Comment: Compliance ke liye audit me user ka naam, exact IST decision time aur reason notes permanently save hote hain.
 
 
+# ==========================================================
+# API Endpoint 7: One-Click CSV Export (/api/export/{rec_id})
+# ==========================================================
 @app.get("/api/export/{rec_id}")
 def export_reconciliation_csv(rec_id: int, db: Session = Depends(get_db)):
-    """Exports reconciliation line items and variances as a CSV report."""
+    """Reconciliation line items aur discrepancy details ko download karne ke liye CSV file generate karta hai."""
     rec = db.query(ReconciliationRecord).filter(ReconciliationRecord.id == rec_id).first()
     if not rec:
         raise HTTPException(status_code=404, detail="Reconciliation record not found")
@@ -354,23 +402,31 @@ def export_reconciliation_csv(rec_id: int, db: Session = Depends(get_db)):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={rec.reconciliation_code}.csv"}
     )
+# Comment: Finance auditors aur ERP system me upload karne ke liye structured CSV export provide karta hai.
 
 
+# ==========================================================
+# API Endpoint 8: Immutable Audit Logs (/api/audit-logs)
+# ==========================================================
 @app.get("/api/audit-logs")
 def get_audit_trail(limit: int = 50, db: Session = Depends(get_db)):
-    """Retrieves immutable audit logs."""
+    """System ke latest audit logs fetch karta hai jisme har event ka exact IST timestamp hota hai."""
     logs = db.query(AuditLogEntry).order_by(desc(AuditLogEntry.timestamp)).limit(limit).all()
     return [l.to_dict() for l in logs]
+# Comment: Frontend me 'Audit Trail' tab me latest 50 events unke IST time, severity aur details ke sath dikhata hai.
 
 
+# ==========================================================
+# API Endpoint 9: 1-Click Demo Scenarios Loader (/api/demo/{scenario_type})
+# ==========================================================
 @app.post("/api/demo/{scenario_type}")
 def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
     """
     1-Click Demo Scenarios:
-    - clean_match: Perfect 3-way match (100 laptops @ Rs 50,000)
-    - price_mismatch: Invoiced Rs 550 vs PO Rs 500
-    - quantity_shortage: Invoiced 100 vs GRN 90 delivered
-    - vendor_alias: ABC Technologies Private Limited vs ABC Technologies Pvt. Ltd.
+    - clean_match: Sab kuch perfectly match karta hai (100 laptops @ Rs 50,000)
+    - price_mismatch: Vendor ne PO se zyada rate lagaya hai (Rs 550 vs Rs 500)
+    - quantity_shortage: Billed 100 lekin delivered sirf 90 pieces
+    - vendor_alias: Pvt Ltd vs Private Limited alias matching
     """
     session_id = str(uuid.uuid4())[:8]
 
@@ -535,12 +591,15 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
             ]
         )
 
+    # 3-Way match aur AI Arbitration run karo
     match_result = perform_three_way_reconciliation(invoice, po, grn)
     arbitration = arbitrate_exceptions(match_result, invoice, po, grn)
 
+    now_ist = get_ist_now()
     rec_code = f"REC-DEMO-{session_id.upper()}"
     reconciliation = ReconciliationRecord(
         reconciliation_code=rec_code,
+        created_at=now_ist,
         vendor_name=invoice.vendor_name,
         invoice_number=invoice.document_number,
         po_number=po.document_number,
@@ -597,14 +656,16 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(reconciliation)
     return reconciliation.to_dict()
+# Comment: Interview ya demo ke dauran bina manual file upload kare 1-click me exact test scenario load kar deta hai.
 
 
 # ==========================================================
-# Server Runner (Supports Render $PORT & Local)
+# Server Runner (Local aur Render Deployment ke liye)
 # ==========================================================
-
 if __name__ == "__main__":
     import uvicorn
+    # Render cloud platform se PORT environment variable uthata hai, default 8000
     port = int(os.environ.get("PORT", 8000))
-    print(f"Starting CacheFlow AI on port {port}...")
+    print(f"[CacheFlow AI] Server starting on port {port} (IST Timezone Active)...")
     uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+# Comment: Yeh file directly 'python app.py' se bhi run ho sakti hai aur Render cloud pe 'uvicorn app:app --port $PORT' se bhi chalti hai.

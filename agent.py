@@ -9,8 +9,12 @@ from models import (
     ArbitrationResponse
 )
 
+# ==========================================================
+# Gemini AI Configuration (Arbitration Agent LLM Setup)
+# ==========================================================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL_ARBITRATION", "gemini-1.5-flash")
+# Comment: Arbitration ke liye hum Gemini Flash ya Pro use karte hain jo detailed reasoning aur professional vendor emails draft karta hai.
 
 ARBITRATION_PROMPT = """
 You are the Accounts Payable AI Arbitration Agent for CacheFlow.
@@ -36,15 +40,20 @@ Rules:
     ]
 }
 """
+# Comment: AI ko strict boundaries di gayi hain ki bina proof ke koi assumption na lagaye aur exact numbers quote karke formal email likhe.
 
 
+# ==========================================================
+# 1. AI Arbitration via Gemini (LLM Mode)
+# ==========================================================
 def arbitrate_with_gemini(
     match_result: ThreeWayMatchResult,
     invoice: DocumentDataSchema,
     po: DocumentDataSchema,
     grn: DocumentDataSchema
 ) -> Optional[ArbitrationResponse]:
-    """Uses Google Gemini to generate explainable arbitration rationale and vendor dispute email."""
+    """Google Gemini LLM use karke discrepancies analyze karta hai aur vendor dispute email draft karta hai."""
+    # Agar API key missing ho toh direct None return karo (deterministic fallback chalega)
     if not GEMINI_API_KEY or len(GEMINI_API_KEY.strip()) < 8:
         return None
 
@@ -64,6 +73,7 @@ def arbitrate_with_gemini(
         response = model.generate_content(user_content)
         text = response.text.strip()
 
+        # Clean markdown code blocks if any
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
@@ -73,8 +83,12 @@ def arbitrate_with_gemini(
     except Exception as e:
         print(f"[Gemini Arbitration] Falling back to deterministic agent: {e}")
         return None
+# Comment: Yeh function LLM ko poora audit report bhejta hai aur structured JSON response wapas leta hai. Agar connection fail ho toh fallback active ho jata hai.
 
 
+# ==========================================================
+# 2. Deterministic Financial Reasoner (100% Offline Reasoner)
+# ==========================================================
 def arbitrate_deterministic(
     match_result: ThreeWayMatchResult,
     invoice: DocumentDataSchema,
@@ -82,9 +96,10 @@ def arbitrate_deterministic(
     grn: DocumentDataSchema
 ) -> ArbitrationResponse:
     """
-    Deterministic Financial Reasoner:
-    Grounded, zero-hallucination analysis and vendor email drafting.
+    Offline Rule-based Arbitration Engine:
+    Zero-hallucination analysis karta hai aur formal dispute email draft karta hai.
     """
+    # Case 1: Agar 3-way reconciliation bilkul clean match ho gaya hai
     if match_result.status == "MATCHED":
         return ArbitrationResponse(
             risk_severity="LOW",
@@ -98,11 +113,14 @@ def arbitrate_deterministic(
                 "Tax calculation and totals align within tolerance."
             ]
         )
+    # Comment: Agar koi dikkat nahi mili toh invoice payment ke liye auto-approve recommend ho jata hai.
 
+    # Case 2: Agar discrepancies ya shortages mile hain
     findings = []
     risk = "MEDIUM"
     action = "ESCALATE_TO_VENDOR"
 
+    # Variance amount ke hisab se financial risk calculate karo
     if match_result.variance_total > 50000:
         risk = "CRITICAL"
         action = "REJECT_INVOICE"
@@ -113,6 +131,7 @@ def arbitrate_deterministic(
     for var in match_result.variances:
         findings.append(var.message)
 
+    # Vendor ko bhejne ke liye professional communication draft taiyyar karo
     variance_bullet_points = "\n".join([f"  - {f}" for f in findings])
     email_draft = f"""Subject: Discrepancy Notification for Invoice #{invoice.document_number} (Ref: PO #{po.document_number})
 
@@ -144,16 +163,21 @@ CacheFlow Financial Systems"""
         dispute_email_draft=email_draft,
         findings=findings
     )
+# Comment: Yeh deterministic engine bina AI ke bhi ekdum formal, professional email generate karta hai jisme actual line items aur rupee amount automatically quote hote hain.
 
 
+# ==========================================================
+# 3. Unified Arbitration Entry Point (Main Function)
+# ==========================================================
 def arbitrate_exceptions(
     match_result: ThreeWayMatchResult,
     invoice: DocumentDataSchema,
     po: DocumentDataSchema,
     grn: DocumentDataSchema
 ) -> ArbitrationResponse:
-    """Unified Arbitration Agent entry point: Gemini first, deterministic fallback."""
+    """Unified Arbitration Agent: Pehle Gemini AI try karta hai, fallback par deterministic reasoner chalata hai."""
     ai_result = arbitrate_with_gemini(match_result, invoice, po, grn)
     if ai_result is not None:
         return ai_result
     return arbitrate_deterministic(match_result, invoice, po, grn)
+# Comment: Node 3 ka unified function jo hamesha valid arbitration response return karta hai chahe AI chale ya offline reasoner.

@@ -1,10 +1,15 @@
 // CacheFlow Frontend Application Controller
+// Yeh file frontend ka saara state management, tab switching aur API calls handle karti hai.
 let currentReconciliationId = null;
 
+// ==========================================================
+// 0. Page Load & Initialization (DOM Load hone par)
+// ==========================================================
 document.addEventListener("DOMContentLoaded", () => {
+  // Lucide icons render karo
   if (window.lucide) lucide.createIcons();
   
-  // Restore view from URL hash on page refresh
+  // URL hash check karo taaki refresh karne par wahi view wapas open ho
   const hash = window.location.hash.replace("#", "");
   if (hash.startsWith("rec-")) {
     const recId = hash.replace("rec-", "");
@@ -16,12 +21,18 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   loadAuditLogs();
 });
+// Comment: Jab bhi page refresh hota hai, URL hash check karke user ki active screen ko reload karta hai taaki data disappear na lage.
 
-// Tab Navigation
+
+// ==========================================================
+// 1. Tab Navigation (Tabs Switch Karna)
+// ==========================================================
 function switchTab(tabName) {
+  // Sabhi tabs ko pehle hide karo aur active styling hatao
   document.querySelectorAll(".tab-pane").forEach(el => el.classList.add("hidden"));
   document.querySelectorAll(".nav-btn").forEach(el => el.classList.remove("active"));
 
+  // Target tab aur nav button ko active banao
   const targetPane = document.getElementById(`tab-${tabName}`);
   const targetNav = document.getElementById(`nav-${tabName}`);
   if (targetPane) targetPane.classList.remove("hidden");
@@ -38,6 +49,7 @@ function switchTab(tabName) {
   if (titleEl && titles[tabName]) titleEl.textContent = titles[tabName];
   window.location.hash = tabName;
 
+  // Tab ke hisab se data load karo
   if (tabName === "dashboard") loadDashboard();
   if (tabName === "reconciliations") loadReconciliationsList();
   if (tabName === "audit") loadAuditLogs();
@@ -45,20 +57,25 @@ function switchTab(tabName) {
 
   if (window.lucide) lucide.createIcons();
 }
+// Comment: Sidebar ke kisi bhi button par click karne par yeh function specific tab ka view render karta hai.
 
-// 1. Dashboard Metrics
+
+// ==========================================================
+// 2. Executive Dashboard Metrics (Top Stats Cards)
+// ==========================================================
 async function loadDashboard() {
   try {
     const res = await fetch("/api/dashboard/stats");
     const data = await res.json();
 
+    // Top summary counters update karo
     document.getElementById("stat-total").textContent = data.total_processed || 0;
     document.getElementById("stat-match-rate").textContent = `${data.match_rate_pct || 0}%`;
     document.getElementById("stat-matched-count").textContent = `(${data.matched_count || 0} clean)`;
     document.getElementById("stat-variances").textContent = data.variance_count || 0;
     document.getElementById("stat-variance-amount").textContent = `₹${(data.total_variance_amount || 0).toLocaleString("en-IN")}`;
 
-    // Load recent table
+    // Recent reconciliations table load karo
     const recRes = await fetch("/api/reconciliations?limit=5");
     const recData = await recRes.json();
     const items = Array.isArray(recData) ? recData : (recData.items || []);
@@ -67,6 +84,8 @@ async function loadDashboard() {
     console.error("Failed to load dashboard metrics:", err);
   }
 }
+// Comment: Dashboard ke top cards (Total Count, Clean Matches, Variance Amount) ko backend API se live update karta hai.
+
 
 function renderRecentTable(items) {
   const tbody = document.getElementById("recent-table-body");
@@ -103,8 +122,12 @@ function renderRecentTable(items) {
 
   if (window.lucide) lucide.createIcons();
 }
+// Comment: Dashboard par recent 5 invoices ki table render karta hai. 'Inspect Matrix' click karne se poora 3-way breakdown dikhta hai.
 
-// 2. Status Badge Helper
+
+// ==========================================================
+// 3. Status Badge Helper (Color Coded Tags)
+// ==========================================================
 function getStatusBadge(status) {
   const map = {
     MATCHED: '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">MATCHED</span>',
@@ -115,8 +138,12 @@ function getStatusBadge(status) {
   };
   return map[status] || `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-300">${status}</span>`;
 }
+// Comment: Status ke hisab se green, yellow, blue ya red color ka modern badge return karta hai.
 
-// 3. File Upload & Processing
+
+// ==========================================================
+// 4. File Upload & Processing Animation
+// ==========================================================
 async function handleFormUpload(e) {
   e.preventDefault();
   const form = document.getElementById("reconciliation-form");
@@ -130,7 +157,7 @@ async function handleFormUpload(e) {
   indicator.classList.remove("hidden");
   submitBtn.disabled = true;
 
-  // Animate progress steps
+  // Agent steps animation dikhao
   text.textContent = "Node 1: Extracting text & structuring JSON...";
   bar.style.width = "30%";
 
@@ -172,8 +199,12 @@ async function handleFormUpload(e) {
     submitBtn.disabled = false;
   }
 }
+// Comment: 3 documents upload hone par 3-Node progress animation chalata hai aur complete hone par direct matrix view par le jata hai.
 
-// 4. View Reconciliation Details
+
+// ==========================================================
+// 5. View Reconciliation Details & Matrix (Detail View)
+// ==========================================================
 async function viewReconciliation(recId) {
   try {
     const res = await fetch(`/api/reconciliations/${recId}`);
@@ -188,7 +219,7 @@ async function viewReconciliation(recId) {
     const detailView = document.getElementById("reconciliation-detail-view");
     detailView.classList.remove("hidden");
 
-    // Populate header
+    // Header information fill karo
     document.getElementById("detail-code").textContent = rec.reconciliation_code;
     document.getElementById("detail-vendor").textContent = rec.vendor_name;
     document.getElementById("detail-invoice-no").textContent = rec.invoice_number;
@@ -196,7 +227,7 @@ async function viewReconciliation(recId) {
     document.getElementById("detail-grn-no").textContent = rec.grn_number || "None";
     document.getElementById("detail-status-badge").outerHTML = `<span id="detail-status-badge">${getStatusBadge(rec.status)}</span>`;
     
-    // Risk badge
+    // Risk badge styling
     const riskEl = document.getElementById("detail-risk-badge");
     const riskColors = {
       LOW: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
@@ -207,10 +238,10 @@ async function viewReconciliation(recId) {
     riskEl.className = `px-2 py-0.5 rounded text-[10px] font-bold uppercase ${riskColors[rec.risk_severity] || riskColors.LOW}`;
     riskEl.textContent = `RISK: ${rec.risk_severity}`;
 
-    // Export CSV link
+    // Export CSV link update karo
     document.getElementById("btn-export-csv").href = `/api/export/${rec.id}`;
 
-    // Arbitration & dispute email
+    // Arbitration & dispute email show karo
     document.getElementById("detail-confidence").textContent = `${rec.confidence_score}%`;
     document.getElementById("detail-arbitration-summary").textContent = rec.arbitration_summary || "No exceptions identified.";
     
@@ -222,7 +253,7 @@ async function viewReconciliation(recId) {
       disputeBox.classList.add("hidden");
     }
 
-    // Line items matrix
+    // Side-by-side line items comparison table populate karo
     document.getElementById("detail-variance-total").textContent = `₹${(rec.variance_total || 0).toLocaleString("en-IN")}`;
     const linesBody = document.getElementById("detail-lines-body");
     
@@ -261,8 +292,12 @@ function closeDetailView() {
   document.getElementById("reconciliations-list-view").classList.remove("hidden");
   loadReconciliationsList();
 }
+// Comment: Yeh function individual invoice ki deep inspection screen kholta hai jisme side-by-side quantities aur prices verify hoti hain.
 
-// 5. Reconciliations List
+
+// ==========================================================
+// 6. Reconciliations Master Table View
+// ==========================================================
 async function loadReconciliationsList() {
   try {
     const status = document.getElementById("filter-status")?.value || "ALL";
@@ -305,8 +340,12 @@ async function loadReconciliationsList() {
 function filterReconciliations() {
   loadReconciliationsList();
 }
+// Comment: Full records list ko status filter (All, Matched, Variance, Approved) ke sath render karta hai.
 
-// 6. Audit Trail
+
+// ==========================================================
+// 7. Immutable Audit Trail (IST Timestamped Event Log)
+// ==========================================================
 async function loadAuditLogs() {
   try {
     const res = await fetch("/api/audit-logs?limit=50");
@@ -325,9 +364,10 @@ async function loadAuditLogs() {
       ERROR: "text-rose-400 bg-rose-500/10"
     };
 
+    // Yahan IST timestamp directly formatted string me render hota hai
     tbody.innerHTML = logs.map(l => `
       <tr class="hover:bg-dark-900/50 font-mono text-[11px]">
-        <td class="p-3 text-slate-400 whitespace-nowrap">${l.timestamp ? new Date(l.timestamp).toLocaleString() : '-'}</td>
+        <td class="p-3 text-slate-400 whitespace-nowrap font-mono">${l.timestamp || '-'}</td>
         <td class="p-3 font-semibold text-indigo-400">${l.event_type}</td>
         <td class="p-3 text-slate-300">${l.source}</td>
         <td class="p-3">
@@ -342,8 +382,12 @@ async function loadAuditLogs() {
     console.error("Failed to load audit logs:", err);
   }
 }
+// Comment: Compliance ke liye audit events ko exact Indian Standard Time (IST) me display karta hai.
 
-// 7. Vendor Memory
+
+// ==========================================================
+// 8. Vendor Memory & Alias Knowledgebase
+// ==========================================================
 async function loadVendorMemory() {
   try {
     const res = await fetch("/api/dashboard/stats");
@@ -380,8 +424,12 @@ async function loadVendorMemory() {
     console.error("Failed to load vendor memory:", err);
   }
 }
+// Comment: Vendor Memory card banata hai jisme vendor ke alternate naam aur past reliability score display hota hai.
 
-// 8. Demo Scenarios & Modals
+
+// ==========================================================
+// 9. 1-Click Demo Scenarios Modal
+// ==========================================================
 function openQuickDemoModal() {
   document.getElementById("demo-modal").classList.remove("hidden");
 }
@@ -401,8 +449,12 @@ async function triggerDemoScenario(scenarioType) {
     alert("Demo Error: " + err.message);
   }
 }
+// Comment: User ko viva ya demo ke liye instant test case run karne deta hai (Clean match, Shortage, ya Price Hike).
 
-// 9. Human Review Modal
+
+// ==========================================================
+// 10. Human Review Sign-Off Modal
+// ==========================================================
 function openReviewModal() {
   document.getElementById("review-modal").classList.remove("hidden");
 }
@@ -439,3 +491,4 @@ function copyDisputeEmail() {
     alert("Vendor dispute email copied to clipboard!");
   });
 }
+// Comment: Reviewer ke final decision ko submit karta hai aur dispute email ko 1-click me copy karne ka feature deta hai.
