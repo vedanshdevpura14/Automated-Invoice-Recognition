@@ -103,12 +103,7 @@ def extraction_node(state: ReconciliationGraphState) -> Dict[str, Any]:
             "workflow_status": "EXTRACTION_SUCCESS"
         }
     except Exception as e:
-        return {
-            "execution_path": execution_path,
-            "current_node": "extraction_node",
-            "workflow_status": "EXTRACTION_FAILED",
-            "error_message": f"Extraction failed: {str(e)}"
-        }
+        raise RuntimeError(f"Document extraction node failed: {str(e)}") from e
 # Comment: Node 1 PyMuPDF aur Tesseract OCR use karke raw unstructured PDF se verified JSON structure banata hai.
 
 

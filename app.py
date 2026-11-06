@@ -8,9 +8,9 @@ from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -70,6 +70,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Starlette text/plain 500 ko intercept karke clean JSON format me return karta hai."""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {str(exc)}"}
+    )
 
 # Static frontend dashboard assets mount karo
 if STATIC_DIR.exists():
@@ -207,141 +215,147 @@ async def upload_and_reconcile(
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     session_id = str(uuid.uuid4())[:8]
 
-    # Step 1: Uploaded files ko validate aur save karo
-    allowed_exts = [".pdf", ".png", ".jpg", ".jpeg", ".txt"]
-    file_paths = {}
-    for role, f in [("invoice", invoice_file), ("po", po_file), ("grn", grn_file)]:
-        ext = os.path.splitext(f.filename)[1].lower()
-        if ext not in allowed_exts:
-            raise HTTPException(status_code=400, detail=f"File {f.filename} format '{ext}' is not supported. Use PDF, TXT, or images.")
-
-        saved_filename = f"{session_id}_{role}_{f.filename}"
-        dest_path = os.path.join(UPLOAD_DIR, saved_filename)
-        content = await f.read()
-        with open(dest_path, "wb") as out:
-            out.write(content)
-        file_paths[role] = dest_path
-
-    # Audit log me upload event record karo (IST time me)
-    record_audit_log(
-        db,
-        event_type="DOCUMENT_UPLOAD",
-        source="API_GATEWAY",
-        description=f"Received 3 documents for batch: {invoice_file.filename}, {po_file.filename}, {grn_file.filename}"
-    )
-
-    # Step 2: LangGraph Orchestration Engine Execution
-    # Presentation Slide 4: "Stateful Workflow with Conditional Routing & Exception Loops"
     try:
+        # Step 1: Uploaded files ko validate aur save karo
+        allowed_exts = [".pdf", ".png", ".jpg", ".jpeg", ".txt"]
+        file_paths = {}
+        for role, f in [("invoice", invoice_file), ("po", po_file), ("grn", grn_file)]:
+            raw_filename = f.filename or f"doc_{role}.txt"
+            safe_filename = Path(raw_filename).name
+            ext = os.path.splitext(safe_filename)[1].lower()
+            if ext not in allowed_exts:
+                raise HTTPException(status_code=400, detail=f"File {safe_filename} format '{ext}' is not supported. Use PDF, TXT, or images.")
+
+            saved_filename = f"{session_id}_{role}_{safe_filename}"
+            dest_path = os.path.join(UPLOAD_DIR, saved_filename)
+            content = await f.read()
+            with open(dest_path, "wb") as out:
+                out.write(content)
+            file_paths[role] = dest_path
+
+        # Audit log me upload event record karo (IST time me)
+        record_audit_log(
+            db,
+            event_type="DOCUMENT_UPLOAD",
+            source="API_GATEWAY",
+            description=f"Received 3 documents for batch: {invoice_file.filename}, {po_file.filename}, {grn_file.filename}"
+        )
+
+        # Step 2: LangGraph Orchestration Engine Execution
+        # Presentation Slide 4: "Stateful Workflow with Conditional Routing & Exception Loops"
         graph_state = run_reconciliation_workflow(
             session_id=session_id,
             invoice_file_path=file_paths["invoice"],
             po_file_path=file_paths["po"],
             grn_file_path=file_paths["grn"]
         )
-    except Exception as e:
-        record_audit_log(db, "WORKFLOW_FAILURE", "LANGGRAPH_ORCHESTRATOR", f"Workflow execution error: {str(e)}", severity="ERROR")
-        raise HTTPException(status_code=500, detail=f"LangGraph execution failed: {str(e)}")
 
-    invoice_data = DocumentDataSchema.model_validate(graph_state["invoice_data"])
-    po_data = DocumentDataSchema.model_validate(graph_state["po_data"])
-    grn_data = DocumentDataSchema.model_validate(graph_state["grn_data"])
-    match_result = ThreeWayMatchResult.model_validate(graph_state["match_result"])
-    arbitration = ArbitrationResponse.model_validate(graph_state["arbitration_result"])
-    fraud_result = graph_state.get("fraud_result") or {}
-    execution_path_str = " -> ".join(graph_state.get("execution_path", []))
+        invoice_data = DocumentDataSchema.model_validate(graph_state["invoice_data"])
+        po_data = DocumentDataSchema.model_validate(graph_state["po_data"])
+        grn_data = DocumentDataSchema.model_validate(graph_state["grn_data"])
+        match_result = ThreeWayMatchResult.model_validate(graph_state["match_result"])
+        arbitration = ArbitrationResponse.model_validate(graph_state["arbitration_result"])
+        fraud_result = graph_state.get("fraud_result") or {}
+        execution_path_str = " -> ".join(graph_state.get("execution_path", []))
 
-    # Audit log me LangGraph events record karo
-    record_audit_log(
-        db,
-        event_type="LANGGRAPH_EXECUTION_COMPLETED",
-        source="LANGGRAPH_ORCHESTRATOR",
-        description=f"Path traversed: {execution_path_str}. Match status: {match_result.status} (Score: {match_result.match_score}%)"
-    )
-
-    if graph_state.get("is_fraud_suspected"):
+        # Audit log me LangGraph events record karo
         record_audit_log(
             db,
-            event_type="FRAUD_SHIELD_ALERT",
-            source="FRAUD_DETECTION_NODE",
-            description=f"Risk: {graph_state.get('fraud_risk_level')} ({len(graph_state.get('fraud_flags', []))} flags): {'; '.join(graph_state.get('fraud_flags', []))}",
-            severity="WARNING" if graph_state.get("fraud_risk_level") != "CRITICAL" else "ERROR"
+            event_type="LANGGRAPH_EXECUTION_COMPLETED",
+            source="LANGGRAPH_ORCHESTRATOR",
+            description=f"Path traversed: {execution_path_str}. Match status: {match_result.status} (Score: {match_result.match_score}%)"
         )
 
-    # Unique reconciliation tracking code with Indian date format (YYYYMMDD)
-    now_ist = get_ist_now()
-    rec_code = f"REC-{now_ist.strftime('%Y%m%d')}-{session_id.upper()}"
+        if graph_state.get("is_fraud_suspected"):
+            record_audit_log(
+                db,
+                event_type="FRAUD_SHIELD_ALERT",
+                source="FRAUD_DETECTION_NODE",
+                description=f"Risk: {graph_state.get('fraud_risk_level')} ({len(graph_state.get('fraud_flags', []))} flags): {'; '.join(graph_state.get('fraud_flags', []))}",
+                severity="WARNING" if graph_state.get("fraud_risk_level") != "CRITICAL" else "ERROR"
+            )
 
-    # Step 3: Master record ko database me save karo
-    reconciliation = ReconciliationRecord(
-        reconciliation_code=rec_code,
-        created_at=now_ist,
-        vendor_name=invoice_data.vendor_name,
-        invoice_number=invoice_data.document_number,
-        po_number=po_data.document_number,
-        grn_number=grn_data.document_number,
-        currency=invoice_data.currency,
-        invoice_total=invoice_data.total_amount,
-        po_total=po_data.total_amount,
-        invoice_tax=invoice_data.tax,
-        po_tax=po_data.tax,
-        variance_total=match_result.variance_total,
-        status="MATCHED" if (match_result.status == "MATCHED" and not graph_state.get("is_fraud_suspected")) else "VARIANCE_DETECTED",
-        has_exceptions=(match_result.status != "MATCHED" or graph_state.get("is_fraud_suspected")),
-        match_score=match_result.match_score,
-        is_fraud_suspected=bool(graph_state.get("is_fraud_suspected", False)),
-        fraud_risk_level=graph_state.get("fraud_risk_level", "LOW"),
-        fraud_score=float(fraud_result.get("fraud_score", 0.0)),
-        fraud_flags_json=json.dumps(graph_state.get("fraud_flags", [])),
-        langgraph_execution_path=execution_path_str,
-        risk_severity=arbitration.risk_severity,
-        confidence_score=arbitration.confidence_score,
-        arbitration_summary=arbitration.summary,
-        dispute_email_draft=arbitration.dispute_email_draft,
-        invoice_json_str=json.dumps(invoice_data.model_dump()),
-        po_json_str=json.dumps(po_data.model_dump()),
-        grn_json_str=json.dumps(grn_data.model_dump()),
-        invoice_file=file_paths["invoice"],
-        po_file=file_paths["po"],
-        grn_file=file_paths["grn"]
-    )
-    db.add(reconciliation)
-    db.commit()
-    db.refresh(reconciliation)
+        # Unique reconciliation tracking code with Indian date format (YYYYMMDD)
+        now_ist = get_ist_now()
+        rec_code = f"REC-{now_ist.strftime('%Y%m%d')}-{session_id.upper()}"
 
-    # Line items ko individual rows me save karo
-    for item in match_result.line_comparisons:
-        line_item = ReconciliationLineItem(
-            reconciliation_id=reconciliation.id,
-            item_code=item.item_code,
-            description=item.description,
-            invoice_qty=item.invoice_qty,
-            grn_qty=item.grn_qty,
-            qty_status=item.qty_status,
-            invoice_unit_price=item.invoice_unit_price,
-            po_unit_price=item.po_unit_price,
-            price_status=item.price_status,
-            invoice_line_total=item.invoice_line_total,
-            po_line_total=item.po_line_total,
-            variance_amount=item.variance_amount,
-            status=item.status
+        # Step 3: Master record ko database me save karo
+        reconciliation = ReconciliationRecord(
+            reconciliation_code=rec_code,
+            created_at=now_ist,
+            vendor_name=invoice_data.vendor_name,
+            invoice_number=invoice_data.document_number,
+            po_number=po_data.document_number,
+            grn_number=grn_data.document_number,
+            currency=invoice_data.currency,
+            invoice_total=invoice_data.total_amount,
+            po_total=po_data.total_amount,
+            invoice_tax=invoice_data.tax,
+            po_tax=po_data.tax,
+            variance_total=match_result.variance_total,
+            status="MATCHED" if (match_result.status == "MATCHED" and not graph_state.get("is_fraud_suspected")) else "VARIANCE_DETECTED",
+            has_exceptions=(match_result.status != "MATCHED" or graph_state.get("is_fraud_suspected")),
+            match_score=match_result.match_score,
+            is_fraud_suspected=bool(graph_state.get("is_fraud_suspected", False)),
+            fraud_risk_level=graph_state.get("fraud_risk_level", "LOW"),
+            fraud_score=float(fraud_result.get("fraud_score", 0.0)),
+            fraud_flags_json=json.dumps(graph_state.get("fraud_flags", [])),
+            langgraph_execution_path=execution_path_str,
+            risk_severity=arbitration.risk_severity,
+            confidence_score=arbitration.confidence_score,
+            arbitration_summary=arbitration.summary,
+            dispute_email_draft=arbitration.dispute_email_draft,
+            invoice_json_str=json.dumps(invoice_data.model_dump()),
+            po_json_str=json.dumps(po_data.model_dump()),
+            grn_json_str=json.dumps(grn_data.model_dump()),
+            invoice_file=file_paths["invoice"],
+            po_file=file_paths["po"],
+            grn_file=file_paths["grn"]
         )
-        db.add(line_item)
+        db.add(reconciliation)
+        db.commit()
+        db.refresh(reconciliation)
 
-    # Vendor memory update karo (vendor match history)
-    update_vendor_memory(db, invoice_data.vendor_name, was_matched=(match_result.status == "MATCHED"))
+        # Line items ko individual rows me save karo
+        for item in match_result.line_comparisons:
+            line_item = ReconciliationLineItem(
+                reconciliation_id=reconciliation.id,
+                item_code=item.item_code,
+                description=item.description,
+                invoice_qty=item.invoice_qty,
+                grn_qty=item.grn_qty,
+                qty_status=item.qty_status,
+                invoice_unit_price=item.invoice_unit_price,
+                po_unit_price=item.po_unit_price,
+                price_status=item.price_status,
+                invoice_line_total=item.invoice_line_total,
+                po_line_total=item.po_line_total,
+                variance_amount=item.variance_amount,
+                status=item.status
+            )
+            db.add(line_item)
 
-    record_audit_log(
-        db,
-        event_type="RECONCILIATION_SAVED",
-        source="SYSTEM",
-        description=f"Reconciliation {rec_code} saved with status {reconciliation.status}",
-        reconciliation_id=reconciliation.id
-    )
+        # Vendor memory update karo (vendor match history)
+        update_vendor_memory(db, invoice_data.vendor_name, was_matched=(match_result.status == "MATCHED"))
 
-    db.commit()
-    db.refresh(reconciliation)
-    return reconciliation.to_dict()
+        record_audit_log(
+            db,
+            event_type="RECONCILIATION_SAVED",
+            source="SYSTEM",
+            description=f"Reconciliation {rec_code} saved with status {reconciliation.status}",
+            reconciliation_id=reconciliation.id
+        )
+
+        db.commit()
+        db.refresh(reconciliation)
+        return reconciliation.to_dict()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        record_audit_log(db, "RECONCILIATION_ERROR", "API_GATEWAY", f"Reconciliation failed: {str(exc)}", severity="ERROR")
+        raise HTTPException(status_code=500, detail=f"Reconciliation failed: {str(exc)}")
 # Comment: Yeh poora 3-Node pipeline ek request me run hota hai aur result return karta hai. User screen par instant matrix dekh sakta hai.
 
 

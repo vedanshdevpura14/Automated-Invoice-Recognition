@@ -185,8 +185,17 @@ async function handleFormUpload(e) {
     });
 
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || "Reconciliation failed");
+      let errorMsg = `Server error (${res.status})`;
+      try {
+        const err = await res.json();
+        errorMsg = err.detail || (typeof err === "string" ? err : JSON.stringify(err));
+      } catch (_) {
+        try {
+          const rawText = await res.text();
+          if (rawText) errorMsg = rawText;
+        } catch (_) {}
+      }
+      throw new Error(errorMsg);
     }
 
     const rec = await res.json();
@@ -215,7 +224,12 @@ async function handleFormUpload(e) {
 async function viewReconciliation(recId) {
   try {
     const res = await fetch(`/api/reconciliations/${recId}`);
-    if (!res.ok) throw new Error("Record not found");
+    if (!res.ok) {
+      let errText = "Record not found";
+      try { const errJson = await res.json(); errText = errJson.detail || JSON.stringify(errJson); }
+      catch (_) { try { const raw = await res.text(); if (raw) errText = raw; } catch (_) {} }
+      throw new Error(errText);
+    }
     const rec = await res.json();
     currentReconciliationId = rec.id;
     window.location.hash = "rec-" + rec.id;
@@ -505,7 +519,12 @@ async function triggerDemoScenario(scenarioType) {
   closeQuickDemoModal();
   try {
     const res = await fetch(`/api/demo/${scenarioType}`, { method: "POST" });
-    if (!res.ok) throw new Error("Failed to load scenario");
+    if (!res.ok) {
+      let errText = "Failed to load scenario";
+      try { const errJson = await res.json(); errText = errJson.detail || JSON.stringify(errJson); }
+      catch (_) { try { const raw = await res.text(); if (raw) errText = raw; } catch (_) {} }
+      throw new Error(errText);
+    }
     const rec = await res.json();
     viewReconciliation(rec.id);
   } catch (err) {
@@ -540,7 +559,12 @@ async function submitReviewAction() {
       body: JSON.stringify({ action, notes, reviewer_name: reviewerName })
     });
 
-    if (!res.ok) throw new Error("Review submission failed");
+    if (!res.ok) {
+      let errText = "Review submission failed";
+      try { const errJson = await res.json(); errText = errJson.detail || JSON.stringify(errJson); }
+      catch (_) { try { const raw = await res.text(); if (raw) errText = raw; } catch (_) {} }
+      throw new Error(errText);
+    }
     closeReviewModal();
     viewReconciliation(currentReconciliationId);
   } catch (err) {
