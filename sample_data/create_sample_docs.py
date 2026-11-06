@@ -126,6 +126,46 @@ Date: 2026-11-01
 Item Code | Description | Received Qty | Remarks
 ---------------------------------------------------------
 RAM-16GB-DDR4 | 16GB DDR4 Server Memory | 90 | Partial delivery received
+""",
+
+    # 4. Duplicate & Fraud Detection Scenario (Presentation Slide 1 & Slide 5 Feature)
+    "invoice_duplicate_fraud.txt": """COMMERCIAL INVOICE
+Vendor: CyberShield Security Solutions
+Invoice No: INV-2026-101
+Date: 2026-11-04
+
+Item Code | Description | Qty | Unit Price | Total
+---------------------------------------------------------
+FW-APPLIANCE | Next-Gen Enterprise Firewall Appliance | 2 | 200000.00 | 400000.00
+PHANTOM-CONSULT | Unauthorized Cyber Assessment Surcharge | 1 | 250000.00 | 250000.00
+
+Subtotal: INR 650000.00
+Tax: INR 117000.00
+Total Amount: INR 767000.00
+""",
+
+    "po_duplicate_fraud.txt": """PURCHASE ORDER
+Vendor: CyberShield Security Solutions
+PO No: PO-2026-909
+Date: 2026-10-15
+
+Item Code | Description | Qty | Unit Price | Total
+---------------------------------------------------------
+FW-APPLIANCE | Next-Gen Enterprise Firewall Appliance | 2 | 125000.00 | 250000.00
+
+Subtotal: INR 250000.00
+Tax: INR 45000.00
+Total Amount: INR 295000.00
+""",
+
+    "grn_duplicate_fraud.txt": """GOODS RECEIPT NOTE (GRN)
+Warehouse: Bangalore Tech Park Security Depo
+GRN No: GRN-2026-909
+Date: 2026-10-30
+
+Item Code | Description | Received Qty
+---------------------------------------------------------
+FW-APPLIANCE | Next-Gen Enterprise Firewall Appliance | 2
 """
 }
 

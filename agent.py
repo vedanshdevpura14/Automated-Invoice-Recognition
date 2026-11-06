@@ -13,8 +13,9 @@ from models import (
 # Gemini AI Configuration (Arbitration Agent LLM Setup)
 # ==========================================================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL_ARBITRATION", "gemini-1.5-flash")
-# Comment: Arbitration ke liye hum Gemini Flash ya Pro use karte hain jo detailed reasoning aur professional vendor emails draft karta hai.
+# Presentation Architecture: "LLM: Google Gemini 2.5 Flash (Parsing) & 2.5 Pro (Reasoning & Arbitration)"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL_ARBITRATION", "gemini-2.5-pro")
+# Comment: Arbitration ke liye hum Gemini Pro / Flash use karte hain jo deep financial reasoning karta hai aur audit-ready vendor dispute notes draft karta hai.
 
 ARBITRATION_PROMPT = """
 You are the Accounts Payable AI Arbitration Agent for CacheFlow.

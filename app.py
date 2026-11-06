@@ -33,6 +33,8 @@ from models import (
 from extractor import extract_text_from_file, extract_document
 from matcher import perform_three_way_reconciliation
 from agent import arbitrate_exceptions
+from fraud import evaluate_fraud_and_duplicates
+from workflow import run_reconciliation_workflow
 
 # Static frontend folder ka path
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -93,7 +95,7 @@ def serve_index():
 # ==========================================================
 @app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
-    """System ki health, database connectivity aur Gemini AI mode check karta hai."""
+    """System ki health, database connectivity, LangGraph orchestration aur Fraud Shield status check karta hai."""
     total_recs = db.query(ReconciliationRecord).count()
     has_gemini = bool(os.getenv("GEMINI_API_KEY") and len(os.getenv("GEMINI_API_KEY", "")) > 8)
     return {
@@ -103,8 +105,11 @@ def health_check(db: Session = Depends(get_db)):
         "total_reconciliations_stored": total_recs,
         "gemini_api_configured": has_gemini,
         "timezone": "IST (UTC+05:30)",
-        "ai_extraction_mode": "Gemini 1.5 Flash" if has_gemini else "Deterministic Heuristics Engine (Offline Safe)",
-        "ai_arbitration_mode": "Gemini 1.5 Flash/Pro" if has_gemini else "Deterministic Reasoner (Offline Safe)"
+        "orchestration_engine": "LangGraph Stateful Multi-Agent StateGraph",
+        "ocr_engine": "PyMuPDF + Tesseract OCR Engine",
+        "fraud_shield_engine": "7-Tier Duplicate & Fraud Detection Shield Active",
+        "ai_extraction_mode": "Gemini 2.5 Flash" if has_gemini else "Deterministic Heuristics Engine (Offline Safe)",
+        "ai_arbitration_mode": "Gemini 2.5 Pro" if has_gemini else "Deterministic Reasoner (Offline Safe)"
     }
 # Comment: Monitoring aur status checking ke liye endpoint hai, bata deta hai ki DB connected hai aur Gemini enabled hai ya offline engine chal raha hai.
 
@@ -114,13 +119,14 @@ def health_check(db: Session = Depends(get_db)):
 # ==========================================================
 @app.get("/api/dashboard/stats")
 def get_dashboard_metrics(db: Session = Depends(get_db)):
-    """Dashboard ke upar ke summary cards (Total Processed, Clean Matches, Variances, Amounts) calculate karta hai."""
+    """Dashboard ke upar ke summary cards (Total Processed, Clean Matches, Variances, Amounts, Fraud Alerts) calculate karta hai."""
     total = db.query(ReconciliationRecord).count()
     matched = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "MATCHED").count()
     approved = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "APPROVED").count()
     variances = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "VARIANCE_DETECTED").count()
     escalated = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "ESCALATED").count()
     rejected = db.query(ReconciliationRecord).filter(ReconciliationRecord.status == "REJECTED").count()
+    fraud_count = db.query(ReconciliationRecord).filter(ReconciliationRecord.is_fraud_suspected == True).count()
 
     total_variance_sum = sum(r.variance_total for r in db.query(ReconciliationRecord.variance_total).all())
     vendors = db.query(VendorMemoryRecord).order_by(desc(VendorMemoryRecord.total_reconciliations)).limit(5).all()
@@ -132,11 +138,12 @@ def get_dashboard_metrics(db: Session = Depends(get_db)):
         "variance_count": variances,
         "escalated_count": escalated,
         "rejected_count": rejected,
+        "fraud_count": fraud_count,
         "match_rate_pct": round((matched / total * 100), 1) if total > 0 else 0.0,
         "total_variance_amount": round(total_variance_sum, 2),
         "top_vendors": [v.to_dict() for v in vendors]
     }
-# Comment: Frontend ke dashboard stats cards (Total runs, Clean matches, Risk amount) isi endpoint se live data uthate hain.
+# Comment: Frontend ke dashboard stats cards (Total runs, Clean matches, Risk amount, Fraud alerts) isi endpoint se live data uthate hain.
 
 
 # ==========================================================
@@ -223,45 +230,49 @@ async def upload_and_reconcile(
         description=f"Received 3 documents for batch: {invoice_file.filename}, {po_file.filename}, {grn_file.filename}"
     )
 
-    # Step 2: Node 1: Extraction Agent (Text parsing and JSON structuring)
+    # Step 2: LangGraph Orchestration Engine Execution
+    # Presentation Slide 4: "Stateful Workflow with Conditional Routing & Exception Loops"
     try:
-        inv_text = extract_text_from_file(file_paths["invoice"])
-        po_text = extract_text_from_file(file_paths["po"])
-        grn_text = extract_text_from_file(file_paths["grn"])
-
-        invoice_data = extract_document(inv_text, doc_hint="invoice")
-        po_data = extract_document(po_text, doc_hint="purchase_order")
-        grn_data = extract_document(grn_text, doc_hint="grn")
+        graph_state = run_reconciliation_workflow(
+            session_id=session_id,
+            invoice_file_path=file_paths["invoice"],
+            po_file_path=file_paths["po"],
+            grn_file_path=file_paths["grn"]
+        )
     except Exception as e:
-        record_audit_log(db, "EXTRACTION_FAILURE", "EXTRACTION_AGENT", f"Extraction error: {str(e)}", severity="ERROR")
-        raise HTTPException(status_code=500, detail=f"Document extraction failed: {str(e)}")
+        record_audit_log(db, "WORKFLOW_FAILURE", "LANGGRAPH_ORCHESTRATOR", f"Workflow execution error: {str(e)}", severity="ERROR")
+        raise HTTPException(status_code=500, detail=f"LangGraph execution failed: {str(e)}")
 
+    invoice_data = DocumentDataSchema.model_validate(graph_state["invoice_data"])
+    po_data = DocumentDataSchema.model_validate(graph_state["po_data"])
+    grn_data = DocumentDataSchema.model_validate(graph_state["grn_data"])
+    match_result = ThreeWayMatchResult.model_validate(graph_state["match_result"])
+    arbitration = ArbitrationResponse.model_validate(graph_state["arbitration_result"])
+    fraud_result = graph_state.get("fraud_result") or {}
+    execution_path_str = " -> ".join(graph_state.get("execution_path", []))
+
+    # Audit log me LangGraph events record karo
     record_audit_log(
         db,
-        event_type="EXTRACTION_COMPLETED",
-        source="EXTRACTION_AGENT",
-        description=f"Extracted data for Invoice #{invoice_data.document_number}, PO #{po_data.document_number}, GRN #{grn_data.document_number}"
+        event_type="LANGGRAPH_EXECUTION_COMPLETED",
+        source="LANGGRAPH_ORCHESTRATOR",
+        description=f"Path traversed: {execution_path_str}. Match status: {match_result.status} (Score: {match_result.match_score}%)"
     )
 
-    # Step 3: Node 2: Deterministic 3-Way Matching Engine
-    match_result = perform_three_way_reconciliation(invoice_data, po_data, grn_data)
-
-    record_audit_log(
-        db,
-        event_type="MATCH_EVALUATION",
-        source="MATCHING_AGENT",
-        description=f"Matching result: {match_result.status} (Score: {match_result.match_score}%, Variances: {len(match_result.variances)})",
-        severity="WARNING" if match_result.status != "MATCHED" else "INFO"
-    )
-
-    # Step 4: Node 3: AI Arbitration Agent (Dispute analysis & email drafting)
-    arbitration = arbitrate_exceptions(match_result, invoice_data, po_data, grn_data)
+    if graph_state.get("is_fraud_suspected"):
+        record_audit_log(
+            db,
+            event_type="FRAUD_SHIELD_ALERT",
+            source="FRAUD_DETECTION_NODE",
+            description=f"Risk: {graph_state.get('fraud_risk_level')} ({len(graph_state.get('fraud_flags', []))} flags): {'; '.join(graph_state.get('fraud_flags', []))}",
+            severity="WARNING" if graph_state.get("fraud_risk_level") != "CRITICAL" else "ERROR"
+        )
 
     # Unique reconciliation tracking code with Indian date format (YYYYMMDD)
     now_ist = get_ist_now()
     rec_code = f"REC-{now_ist.strftime('%Y%m%d')}-{session_id.upper()}"
 
-    # Step 5: Master record ko database me save karo
+    # Step 3: Master record ko database me save karo
     reconciliation = ReconciliationRecord(
         reconciliation_code=rec_code,
         created_at=now_ist,
@@ -275,9 +286,14 @@ async def upload_and_reconcile(
         invoice_tax=invoice_data.tax,
         po_tax=po_data.tax,
         variance_total=match_result.variance_total,
-        status="MATCHED" if match_result.status == "MATCHED" else "VARIANCE_DETECTED",
-        has_exceptions=(match_result.status != "MATCHED"),
+        status="MATCHED" if (match_result.status == "MATCHED" and not graph_state.get("is_fraud_suspected")) else "VARIANCE_DETECTED",
+        has_exceptions=(match_result.status != "MATCHED" or graph_state.get("is_fraud_suspected")),
         match_score=match_result.match_score,
+        is_fraud_suspected=bool(graph_state.get("is_fraud_suspected", False)),
+        fraud_risk_level=graph_state.get("fraud_risk_level", "LOW"),
+        fraud_score=float(fraud_result.get("fraud_score", 0.0)),
+        fraud_flags_json=json.dumps(graph_state.get("fraud_flags", [])),
+        langgraph_execution_path=execution_path_str,
         risk_severity=arbitration.risk_severity,
         confidence_score=arbitration.confidence_score,
         arbitration_summary=arbitration.summary,
@@ -550,6 +566,48 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
                 LineItemSchema(item_code="RAM-16GB-DDR4", description="16GB DDR4 Server Memory Modules", quantity=90.0, unit_price=0.0, total_price=0.0)
             ]
         )
+    elif scenario_type == "duplicate_fraud":
+        # Scenario 5: Duplicate Billing, Ghost Line Item & Price Inflation Fraud
+        invoice = DocumentDataSchema(
+            document_type="invoice",
+            vendor_name="CyberShield Security Solutions",
+            document_number=f"INV-FRAUD-{session_id}",
+            document_date="2026-11-04",
+            currency="INR",
+            subtotal=650000.0,
+            tax=117000.0,
+            total_amount=767000.0,
+            line_items=[
+                LineItemSchema(item_code="FW-APPLIANCE", description="Next-Gen Enterprise Firewall Appliance", quantity=2.0, unit_price=200000.0, total_price=400000.0), # Invoiced at 200,000 vs PO 125,000 (+60% surge!)
+                LineItemSchema(item_code="PHANTOM-CONSULT", description="Unauthorized Cyber Assessment Surcharge", quantity=1.0, unit_price=250000.0, total_price=250000.0) # Ghost item, not in PO!
+            ]
+        )
+        po = DocumentDataSchema(
+            document_type="purchase_order",
+            vendor_name="CyberShield Security Solutions",
+            document_number=f"PO-SEC-{session_id}",
+            document_date="2026-10-15",
+            currency="INR",
+            subtotal=250000.0,
+            tax=45000.0,
+            total_amount=295000.0,
+            line_items=[
+                LineItemSchema(item_code="FW-APPLIANCE", description="Next-Gen Enterprise Firewall Appliance", quantity=2.0, unit_price=125000.0, total_price=250000.0)
+            ]
+        )
+        grn = DocumentDataSchema(
+            document_type="grn",
+            vendor_name="CyberShield Security Solutions",
+            document_number=f"GRN-SEC-{session_id}",
+            document_date="2026-10-30",
+            currency="INR",
+            subtotal=0.0,
+            tax=0.0,
+            total_amount=0.0,
+            line_items=[
+                LineItemSchema(item_code="FW-APPLIANCE", description="Next-Gen Enterprise Firewall Appliance", quantity=2.0, unit_price=0.0, total_price=0.0)
+            ]
+        )
     else:
         invoice = DocumentDataSchema(
             document_type="invoice",
@@ -591,9 +649,25 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
             ]
         )
 
-    # 3-Way match aur AI Arbitration run karo
+    # 3-Way match, Fraud Detection aur AI Arbitration run karo
     match_result = perform_three_way_reconciliation(invoice, po, grn)
+    fraud_result = evaluate_fraud_and_duplicates(invoice, po, grn, match_result, db=db)
     arbitration = arbitrate_exceptions(match_result, invoice, po, grn)
+
+    # Agar fraud alerts hain toh arbitration summary aur risk severity me add karo
+    if fraud_result.is_fraud_suspected:
+        for flag in fraud_result.flags:
+            if flag not in arbitration.findings:
+                arbitration.findings.append(f"[FRAUD SHIELD ALERT] {flag}")
+        if fraud_result.fraud_risk_level in ["HIGH", "CRITICAL"]:
+            arbitration.risk_severity = fraud_result.fraud_risk_level
+            arbitration.recommended_action = "REJECT_INVOICE" if fraud_result.fraud_risk_level == "CRITICAL" else "HOLD_PAYMENT"
+
+    # LangGraph simulated execution path for demo scenario
+    if match_result.status == "MATCHED" and not fraud_result.is_fraud_suspected:
+        langgraph_path = "START -> Node 1: Extraction Agent -> Node 2: 3-Way Matching Agent -> Node 3: Fraud & Duplicate Shield -> Node 6: Auto-Reconciliation Completed -> END"
+    else:
+        langgraph_path = "START -> Node 1: Extraction Agent -> Node 2: 3-Way Matching Agent -> Node 3: Fraud & Duplicate Shield -> Node 4: AI Arbitration Agent -> Node 5: Human Review Package Ready -> END"
 
     now_ist = get_ist_now()
     rec_code = f"REC-DEMO-{session_id.upper()}"
@@ -610,9 +684,14 @@ def run_demo_scenario(scenario_type: str, db: Session = Depends(get_db)):
         invoice_tax=invoice.tax,
         po_tax=po.tax,
         variance_total=match_result.variance_total,
-        status="MATCHED" if match_result.status == "MATCHED" else "VARIANCE_DETECTED",
-        has_exceptions=(match_result.status != "MATCHED"),
+        status="MATCHED" if (match_result.status == "MATCHED" and not fraud_result.is_fraud_suspected) else "VARIANCE_DETECTED",
+        has_exceptions=(match_result.status != "MATCHED" or fraud_result.is_fraud_suspected),
         match_score=match_result.match_score,
+        is_fraud_suspected=fraud_result.is_fraud_suspected,
+        fraud_risk_level=fraud_result.fraud_risk_level,
+        fraud_score=fraud_result.fraud_score,
+        fraud_flags_json=json.dumps(fraud_result.flags),
+        langgraph_execution_path=langgraph_path,
         risk_severity=arbitration.risk_severity,
         confidence_score=arbitration.confidence_score,
         arbitration_summary=arbitration.summary,

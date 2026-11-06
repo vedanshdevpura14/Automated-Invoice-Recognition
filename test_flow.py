@@ -6,12 +6,15 @@ from models import (
     ReconciliationRecord
 )
 from matcher import perform_three_way_reconciliation, are_vendors_matching
-from extractor import extract_document
+from extractor import extract_document, extract_text_from_file
 from agent import arbitrate_deterministic
+from fraud import evaluate_fraud_and_duplicates, check_duplicate_invoice_number
+from workflow import run_reconciliation_workflow, compiled_graph
 from app import health_check, run_demo_scenario, get_dashboard_metrics, export_reconciliation_csv
 
 # ==========================================================
-# Automated Test Suite for 3-Way Invoice Reconciliation
+# Automated Test Suite for Automated Invoice Recognition
+# (Presentation Problem Statement 49 - Complete Verification)
 # (Hinglish Comments ke sath har test ka clear explanation)
 # ==========================================================
 
@@ -150,6 +153,95 @@ def test_extractor_heuristics():
 # Comment: Yeh test check karta hai ki deterministic parser bina kisi AI ke bhi invoice number aur vendor name 100% accurately extract kar raha hai.
 
 
+def test_fraud_and_duplicate_detection():
+    """
+    Presentation Requirement: 'Duplicate or fraud detection exists.'
+    Verify karta hai:
+    1. Ghost Invoicing (PO me jo item nahi hai)
+    2. Price Surge Anomaly (>20% price hike)
+    3. Severe risk escalation
+    """
+    invoice = DocumentDataSchema(
+        document_type="invoice",
+        vendor_name="CyberShield Security Solutions",
+        document_number="INV-FRAUD-001",
+        currency="INR",
+        subtotal=650000.0,
+        tax=117000.0,
+        total_amount=767000.0,
+        line_items=[
+            LineItemSchema(item_code="FW-APPLIANCE", description="Firewall Appliance", quantity=2.0, unit_price=200000.0, total_price=400000.0), # PO was 125,000 (+60% hike)
+            LineItemSchema(item_code="PHANTOM-EXPENSE", description="Unauthorized Security Audit", quantity=1.0, unit_price=250000.0, total_price=250000.0) # Ghost item
+        ]
+    )
+    po = DocumentDataSchema(
+        document_type="purchase_order",
+        vendor_name="CyberShield Security Solutions",
+        document_number="PO-SEC-001",
+        currency="INR",
+        subtotal=250000.0,
+        tax=45000.0,
+        total_amount=295000.0,
+        line_items=[
+            LineItemSchema(item_code="FW-APPLIANCE", description="Firewall Appliance", quantity=2.0, unit_price=125000.0, total_price=250000.0)
+        ]
+    )
+    grn = DocumentDataSchema(
+        document_type="grn",
+        vendor_name="CyberShield Security Solutions",
+        document_number="GRN-SEC-001",
+        currency="INR",
+        subtotal=0.0,
+        tax=0.0,
+        total_amount=0.0,
+        line_items=[
+            LineItemSchema(item_code="FW-APPLIANCE", description="Firewall Appliance", quantity=2.0, unit_price=0.0, total_price=0.0)
+        ]
+    )
+
+    fraud_res = evaluate_fraud_and_duplicates(invoice, po, grn)
+    assert fraud_res.is_fraud_suspected is True
+    assert fraud_res.fraud_risk_level in ["HIGH", "CRITICAL"]
+    assert fraud_res.fraud_score >= 40.0
+    # Ghost item aur price inflation dono detect hone chahiye
+    flags_str = " ".join(fraud_res.flags)
+    assert "GHOST_INVOICING" in flags_str
+    assert "PRICE_INFLATION_ANOMALY" in flags_str
+# Comment: Yeh test prove karta hai ki presentation ke mutabik duplicate billing aur fraudulent pricing turant block hoti hai.
+
+
+def test_langgraph_workflow_execution():
+    """
+    Presentation Requirement: 'LangGraph should also be implemented.'
+    Verify karta hai:
+    1. LangGraph StateGraph pipeline run hoti hai
+    2. Node 1 (Extraction) -> Node 2 (Matching) -> Node 3 (Fraud) -> Node 4 (Arbitration) traverse hote hain
+    3. Conditional routing exceptions ke base par sahi branch select karta hai
+    """
+    sample_inv = os.path.abspath("sample_data/invoice_clean_match.txt")
+    sample_po = os.path.abspath("sample_data/po_clean_match.txt")
+    sample_grn = os.path.abspath("sample_data/grn_clean_match.txt")
+
+    # LangGraph workflow invoke karo
+    final_state = run_reconciliation_workflow(
+        session_id="TEST-LG-001",
+        invoice_file_path=sample_inv,
+        po_file_path=sample_po,
+        grn_file_path=sample_grn
+    )
+
+    # State verify karo
+    assert final_state["session_id"] == "TEST-LG-001"
+    assert "Node 1: Extraction Agent" in final_state["execution_path"]
+    assert "Node 2: 3-Way Matching Agent" in final_state["execution_path"]
+    assert "Node 3: Fraud & Duplicate Shield" in final_state["execution_path"]
+    assert final_state["has_exceptions"] is False
+    assert final_state["is_fraud_suspected"] is False
+    # Clean match par auto-completion node par route hona chahiye
+    assert "Node 6: Auto-Reconciliation Completed" in final_state["execution_path"]
+# Comment: Yeh test LangGraph ke multi-agent StateGraph flow aur conditional edge execution ko verify karta hai.
+
+
 def test_api_pipeline():
     """FastAPI endpoints: health check, demo scenario, dashboard KPIs aur CSV export verify karta hai."""
     db = SessionLocal()
@@ -158,6 +250,8 @@ def test_api_pipeline():
         health = health_check(db)
         assert health["status"] == "healthy"
         assert health["database"] == "connected"
+        assert "LangGraph" in health["orchestration_engine"]
+        assert "Fraud" in health["fraud_shield_engine"]
 
         # 2. Clean match demo scenario run karo
         demo_rec = run_demo_scenario("clean_match", db)
@@ -165,17 +259,23 @@ def test_api_pipeline():
         assert demo_rec["match_score"] == 100.0
         rec_id = demo_rec["id"]
 
-        # 3. Dashboard metrics verify karo
-        stats = get_dashboard_metrics(db)
-        assert stats["total_processed"] >= 1
+        # 3. Fraud demo scenario run karo
+        fraud_demo = run_demo_scenario("duplicate_fraud", db)
+        assert fraud_demo["is_fraud_suspected"] is True
+        assert fraud_demo["fraud_risk_level"] in ["HIGH", "CRITICAL"]
 
-        # 4. CSV export verify karo
+        # 4. Dashboard metrics verify karo (fraud count included)
+        stats = get_dashboard_metrics(db)
+        assert stats["total_processed"] >= 2
+        assert stats["fraud_count"] >= 1
+
+        # 5. CSV export verify karo
         csv_resp = export_reconciliation_csv(rec_id, db)
         assert csv_resp.status_code == 200
         assert "INV-" in str(csv_resp.body)
     finally:
         db.close()
-# Comment: Pure system ka end-to-end integration test jo database, APIs aur CSV export sab verify karta hai.
+# Comment: Pure system ka end-to-end integration test jo database, LangGraph, Fraud Shield, APIs aur CSV export sab verify karta hai.
 
 
 if __name__ == "__main__":

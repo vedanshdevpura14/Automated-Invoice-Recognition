@@ -1,17 +1,47 @@
 import os
 import re
+import io
 import json
 from typing import Optional
+from pathlib import Path
 import fitz  # PyMuPDF library: digital PDFs se text fast extract karne ke liye
 
 from models import DocumentDataSchema, LineItemSchema
 
 # ==========================================================
+# OCR Configuration (Tesseract OCR + PyMuPDF Integration)
+# ==========================================================
+# Presentation Architecture ke hisaab se:
+# - PyMuPDF digital PDFs ko ultra-fast parse karta hai
+# - Tesseract OCR scanned images aur non-selectable PDFs se text extract karta hai
+TESSERACT_AVAILABLE = False
+try:
+    import pytesseract
+    from PIL import Image
+
+    # Windows par Tesseract ke standard paths check karo
+    possible_tesseract_paths = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe")
+    ]
+    for p in possible_tesseract_paths:
+        if os.path.exists(p):
+            pytesseract.pytesseract.tesseract_cmd = p
+            break
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+
+# Comment: Agar system me Tesseract installed hai toh OCR directly run hoga, nahi toh safe text extractor chalega taaki code kabhi crash na ho.
+
+
+# ==========================================================
 # Gemini AI Configuration (Google LLM Setup)
 # ==========================================================
-# Environment se Gemini API key aur model ka naam uthate hain.
+# Presentation architecture me Gemini 2.5 Flash / 1.5 Flash structured parsing ke liye bataya gaya hai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL_EXTRACTION", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL_EXTRACTION", "gemini-2.5-flash")
 # Comment: Agar user ne API key set ki hai toh Gemini Flash model use hoga, nahi toh offline heuristic engine run hoga.
 
 EXTRACTION_SYSTEM_PROMPT = """
@@ -49,51 +79,83 @@ Rules:
 
 
 # ==========================================================
-# 1. Raw Text Extraction (File se Text Nikalna)
+# 1. OCR & Raw Text Extraction (File se Text Nikalna)
 # ==========================================================
+def perform_ocr_on_pil_image(pil_img) -> str:
+    """PIL image par Tesseract OCR run karta hai with error handling."""
+    if not TESSERACT_AVAILABLE:
+        return ""
+    try:
+        import pytesseract
+        ocr_text = pytesseract.image_to_string(pil_img)
+        return ocr_text.strip()
+    except Exception as e:
+        print(f"[OCR Warning] Tesseract execution notice: {e}")
+        return ""
+
+
 def extract_text_from_file(file_path: str) -> str:
     """
-    PDF ya Text file se selectable text extract karta hai using PyMuPDF (fitz).
+    Presentation Pipeline - Node 1 Extraction:
+    1. Digital PDF ho toh PyMuPDF (fitz) se super fast text extract karta hai.
+    2. Agar scanned PDF ho (empty text), toh page ko image render karke Tesseract OCR chalata hai.
+    3. Agar image file (.png, .jpg, .jpeg) ho, toh direct Tesseract OCR run karta hai.
+    4. Plain text (.txt) file ho toh direct read karta hai.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
     ext = os.path.splitext(file_path)[1].lower()
 
-    # Agar simple text (.txt) file hai toh direct read karo
+    # Step 1: Plain Text (.txt) Handling
     if ext == ".txt":
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read().strip()
 
-    # Agar PDF (.pdf) file hai toh PyMuPDF (fitz) se page by page text extract karo
+    # Step 2: PDF (.pdf) Handling (PyMuPDF + Scanned Page OCR)
     if ext == ".pdf":
         extracted_pages = []
         try:
             with fitz.open(file_path) as doc:
                 for page_num in range(len(doc)):
                     page = doc[page_num]
-                    text = page.get_text("text").strip()
-                    if text:
-                        extracted_pages.append(text)
+                    page_text = page.get_text("text").strip()
+                    
+                    # Agar selectable text mil gaya toh seedhe use karo
+                    if len(page_text) > 20:
+                        extracted_pages.append(page_text)
+                    else:
+                        # Scanned document case: PDF page ko pixmap image me convert karo aur OCR chalao
+                        try:
+                            pix = page.get_pixmap(dpi=150)
+                            img = Image.open(io.BytesIO(pix.tobytes("png")))
+                            ocr_result = perform_ocr_on_pil_image(img)
+                            if ocr_result:
+                                extracted_pages.append(f"[Scanned Page {page_num+1} OCR Text]\n{ocr_result}")
+                            elif page_text:
+                                extracted_pages.append(page_text)
+                        except Exception as ocr_err:
+                            if page_text:
+                                extracted_pages.append(page_text)
             
             combined_text = "\n\n--- Page Break ---\n\n".join(extracted_pages).strip()
             if combined_text:
                 return combined_text
         except Exception as e:
-            print(f"[OCR Warning] PyMuPDF extraction issue: {e}")
+            print(f"[Extraction Warning] PyMuPDF extraction issue: {e}")
 
-    # Fallback: Agar image file (.png, .jpg) ho toh pytesseract use karne ki koshish karo
-    try:
-        import pytesseract
-        from PIL import Image
-        if ext in [".png", ".jpg", ".jpeg"]:
+    # Step 3: Raw Image Files (.png, .jpg, .jpeg) Handling via OCR
+    if ext in [".png", ".jpg", ".jpeg", ".bmp", ".tiff"]:
+        try:
             img = Image.open(file_path)
-            return pytesseract.image_to_string(img).strip()
-    except Exception:
-        pass
+            ocr_text = perform_ocr_on_pil_image(img)
+            if ocr_text:
+                return ocr_text
+        except Exception as img_err:
+            print(f"[OCR Warning] Image read error: {img_err}")
 
     return "Document content could not be parsed as selectable text."
-# Comment: Yeh function uploaded document ka poora text nikal kar raw string me convert kar deta hai taaki parser usko padh sake.
+# Comment: Yeh function digital PDFs aur scanned images dono se clean text nikalne ke liye PyMuPDF aur Tesseract OCR ka hybrid flow use karta hai.
 
 
 # ==========================================================

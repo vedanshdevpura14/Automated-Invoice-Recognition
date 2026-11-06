@@ -74,6 +74,8 @@ async function loadDashboard() {
     document.getElementById("stat-matched-count").textContent = `(${data.matched_count || 0} clean)`;
     document.getElementById("stat-variances").textContent = data.variance_count || 0;
     document.getElementById("stat-variance-amount").textContent = `₹${(data.total_variance_amount || 0).toLocaleString("en-IN")}`;
+    const fraudEl = document.getElementById("stat-fraud");
+    if (fraudEl) fraudEl.textContent = data.fraud_count || 0;
 
     // Recent reconciliations table load karo
     const recRes = await fetch("/api/reconciliations?limit=5");
@@ -157,19 +159,24 @@ async function handleFormUpload(e) {
   indicator.classList.remove("hidden");
   submitBtn.disabled = true;
 
-  // Agent steps animation dikhao
-  text.textContent = "Node 1: Extracting text & structuring JSON...";
-  bar.style.width = "30%";
+  // LangGraph Agentic multi-node execution animation
+  text.textContent = "Node 1: Extraction Agent (PyMuPDF & Tesseract OCR)...";
+  bar.style.width = "25%";
 
   setTimeout(() => {
-    text.textContent = "Node 2: Running deterministic 3-way matching rules...";
-    bar.style.width = "65%";
-  }, 900);
+    text.textContent = "Node 2: Matching Agent (Pandas 3-Way Deterministic Match)...";
+    bar.style.width = "50%";
+  }, 800);
 
   setTimeout(() => {
-    text.textContent = "Node 3: AI Arbitration Agent analyzing discrepancies...";
+    text.textContent = "Node 3: Fraud Shield (Duplicate & Anomaly Check)...";
+    bar.style.width = "75%";
+  }, 1600);
+
+  setTimeout(() => {
+    text.textContent = "Node 4: AI Arbitration Agent (Gemini Reasoning & Dispute Draft)...";
     bar.style.width = "90%";
-  }, 1800);
+  }, 2400);
 
   try {
     const res = await fetch("/api/upload-and-reconcile", {
@@ -240,6 +247,62 @@ async function viewReconciliation(recId) {
 
     // Export CSV link update karo
     document.getElementById("btn-export-csv").href = `/api/export/${rec.id}`;
+
+    // LangGraph Multi-Agent Execution Path render karo
+    const pathContainer = document.getElementById("detail-langgraph-path");
+    if (pathContainer) {
+      const rawPath = rec.langgraph_execution_path || "START -> Node 1: Extraction Agent -> Node 2: 3-Way Matching Agent -> Node 3: Fraud & Duplicate Shield -> Node 4: AI Arbitration Agent -> Node 5: Human Review Package Ready -> END";
+      const nodes = rawPath.split(" -> ");
+      pathContainer.innerHTML = nodes.map((nodeName, idx) => `
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-dark-900 border ${idx === nodes.length - 1 ? 'border-emerald-500/50 text-emerald-300 bg-emerald-950/20' : 'border-blue-500/30 text-blue-300'}">
+          <span class="w-1.5 h-1.5 rounded-full ${idx === nodes.length - 1 ? 'bg-emerald-400' : 'bg-blue-400'}"></span>
+          ${nodeName}
+        </span>
+        ${idx < nodes.length - 1 ? '<span class="text-slate-600 font-bold">→</span>' : ''}
+      `).join("");
+    }
+
+    // Fraud & Duplicate Shield Panel render karo
+    const fraudScoreEl = document.getElementById("detail-fraud-score-badge");
+    const fraudStatusEl = document.getElementById("detail-fraud-status-badge");
+    const fraudFlagsContainer = document.getElementById("detail-fraud-flags-container");
+
+    if (fraudScoreEl) {
+      const score = rec.fraud_score || 0;
+      fraudScoreEl.textContent = `RISK SCORE: ${score}/100`;
+      fraudScoreEl.className = `px-2.5 py-0.5 rounded text-[11px] font-bold font-mono ${score >= 60 ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40' : (score > 0 ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40')}`;
+    }
+
+    if (fraudStatusEl) {
+      if (rec.is_fraud_suspected) {
+        fraudStatusEl.textContent = `ALERT: ${rec.fraud_risk_level || 'SUSPICIOUS'}`;
+        fraudStatusEl.className = "px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-500/20 text-rose-400 border border-rose-500/40";
+      } else {
+        fraudStatusEl.textContent = "SHIELD VERIFIED CLEAN";
+        fraudStatusEl.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40";
+      }
+    }
+
+    if (fraudFlagsContainer) {
+      const flags = rec.fraud_flags || [];
+      if (flags.length > 0) {
+        fraudFlagsContainer.innerHTML = flags.map(f => `
+          <div class="p-2.5 rounded-lg bg-rose-950/20 border border-rose-500/30 text-rose-300 flex items-start gap-2">
+            <i data-lucide="alert-octagon" class="w-4 h-4 text-rose-400 shrink-0 mt-0.5"></i>
+            <div>
+              <span class="font-bold text-rose-200">${f.split(':')[0]}:</span>
+              <span class="text-[11px] text-rose-300 ml-1">${f.substring(f.indexOf(':') + 1)}</span>
+            </div>
+          </div>
+        `).join("");
+      } else {
+        fraudFlagsContainer.innerHTML = `
+          <div class="p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-500/30 text-emerald-300 flex items-center gap-2">
+            <i data-lucide="shield-check" class="w-4 h-4 text-emerald-400"></i>
+            <span><strong>All 7 Fraud Checks Passed:</strong> No duplicate invoice numbers, no duplicate amounts, no unauthorized ghost line items, and no price inflation detected.</span>
+          </div>`;
+      }
+    }
 
     // Arbitration & dispute email show karo
     document.getElementById("detail-confidence").textContent = `${rec.confidence_score}%`;

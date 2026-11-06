@@ -61,9 +61,30 @@ def get_db():
 # Comment: Yeh dependency injection helper hai jo har request pe DB session kholta hai aur request khatam hone par safely band karta hai.
 
 def init_db():
-    """Database tables create karta hai agar pehle se nahi bani ho."""
+    """Database tables create karta hai aur missing columns ko safely alter karke add karta hai."""
     Base.metadata.create_all(bind=engine)
-# Comment: Jab app start hota hai toh yeh function sari tables (reconciliations, line_items, audit_logs) create kar deta hai.
+    # Check and add new columns if upgrading existing sqlite database
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            existing_cols = []
+            res = conn.execute(text("PRAGMA table_info(reconciliations);"))
+            existing_cols = [row[1] for row in res.fetchall()]
+            
+            new_columns = [
+                ("is_fraud_suspected", "BOOLEAN DEFAULT 0"),
+                ("fraud_risk_level", "VARCHAR(20) DEFAULT 'LOW'"),
+                ("fraud_score", "FLOAT DEFAULT 0.0"),
+                ("fraud_flags_json", "TEXT DEFAULT NULL"),
+                ("langgraph_execution_path", "TEXT DEFAULT NULL")
+            ]
+            for col_name, col_def in new_columns:
+                if col_name not in existing_cols:
+                    conn.execute(text(f"ALTER TABLE reconciliations ADD COLUMN {col_name} {col_def};"))
+            conn.commit()
+    except Exception as e:
+        print(f"[DB Init Notice] Safe migration notice: {e}")
+# Comment: Jab app start hota hai toh yeh function sari tables create karta hai aur agar koi column missing ho toh add kar deta hai.
 
 
 # ==========================================================
@@ -159,6 +180,17 @@ class ReviewRequest(BaseModel):
 # Comment: Final decision lene ke liye human reviewer ka action aur unke notes capture karta hai.
 
 
+class FraudDetectionResult(BaseModel):
+    # Duplicate aur Fraud Detection engine ka structured output
+    is_fraud_suspected: bool = Field(default=False, description="Kya fraud ya duplicate invoice suspect hua hai?")
+    fraud_risk_level: str = Field(default="LOW", description="LOW | MEDIUM | HIGH | CRITICAL")
+    fraud_score: float = Field(default=0.0, description="0 se 100 tak fraud risk score")
+    flags: List[str] = Field(default_factory=list, description="Saare detect huye fraud warnings/flags")
+    recommended_action: str = Field(default="PROCEED", description="PROCEED | FLAG_FOR_AUDIT | HOLD_PAYMENT | IMMEDIATE_REJECTION")
+    details: dict = Field(default_factory=dict, description="Detailed technical audit metrics")
+# Comment: Yeh model fraud analysis ki poori summary rakhta hai (jaise duplicate bill, ghost line items, rate tampering).
+
+
 # ==========================================================
 # 2. SQLAlchemy Database Tables (Persistent Storage)
 # ==========================================================
@@ -189,6 +221,15 @@ class ReconciliationRecord(Base):
     status = Column(String(50), default="PENDING", index=True)
     has_exceptions = Column(Boolean, default=False)
     match_score = Column(Float, default=100.0)
+
+    # Fraud & Duplicate Detection metrics
+    is_fraud_suspected = Column(Boolean, default=False)
+    fraud_risk_level = Column(String(20), default="LOW")
+    fraud_score = Column(Float, default=0.0)
+    fraud_flags_json = Column(Text, nullable=True) # JSON list of flags
+
+    # LangGraph Orchestration Telemetry
+    langgraph_execution_path = Column(Text, nullable=True) # e.g. "START -> extraction_node -> matching_node -> arbitration_node -> END"
 
     # AI Arbitration Outputs
     risk_severity = Column(String(20), default="LOW")
@@ -237,6 +278,11 @@ class ReconciliationRecord(Base):
             "status": self.status,
             "has_exceptions": self.has_exceptions,
             "match_score": self.match_score,
+            "is_fraud_suspected": self.is_fraud_suspected,
+            "fraud_risk_level": self.fraud_risk_level,
+            "fraud_score": self.fraud_score,
+            "fraud_flags": json.loads(self.fraud_flags_json) if self.fraud_flags_json else [],
+            "langgraph_execution_path": self.langgraph_execution_path,
             "risk_severity": self.risk_severity,
             "confidence_score": self.confidence_score,
             "arbitration_summary": self.arbitration_summary,

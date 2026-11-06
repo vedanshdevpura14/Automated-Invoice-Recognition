@@ -1,0 +1,8 @@
+GOODS RECEIPT NOTE (GRN)
+Warehouse: Bangalore Tech Park Security Depo
+GRN No: GRN-2026-909
+Date: 2026-10-30
+
+Item Code | Description | Received Qty
+---------------------------------------------------------
+FW-APPLIANCE | Next-Gen Enterprise Firewall Appliance | 2
