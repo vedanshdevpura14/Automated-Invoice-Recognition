@@ -26,6 +26,8 @@ from models import (
     VendorMemoryRecord,
     DocumentDataSchema,
     LineItemSchema,
+    ThreeWayMatchResult,
+    ArbitrationResponse,
     ReviewRequest,
     record_audit_log,
     update_vendor_memory
@@ -198,7 +200,7 @@ def get_reconciliation_detail(rec_id: int, db: Session = Depends(get_db)):
 # API Endpoint 5: Document Upload & Main 3-Way Reconciliation Pipeline
 # ==========================================================
 @app.post("/api/upload-and-reconcile")
-async def upload_and_reconcile(
+def upload_and_reconcile(
     invoice_file: UploadFile = File(...),
     po_file: UploadFile = File(...),
     grn_file: UploadFile = File(...),
@@ -228,7 +230,7 @@ async def upload_and_reconcile(
 
             saved_filename = f"{session_id}_{role}_{safe_filename}"
             dest_path = os.path.join(UPLOAD_DIR, saved_filename)
-            content = await f.read()
+            content = f.file.read()
             with open(dest_path, "wb") as out:
                 out.write(content)
             file_paths[role] = dest_path
