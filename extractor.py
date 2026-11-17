@@ -268,7 +268,7 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
     def find_amount(keywords: list[str]) -> float:
         for kw in keywords:
             # Yeh regex tax rate parentheses jaise Tax (18% GST): ko bhi accurately handle karta hai
-            pattern = rf"\b{kw}\b(?:\s*\([^)]*\))?(?:\s*@\s*[\d.]+%|\s*rate\s*[\d.]+%)?[:\s]+(?:[A-Za-z$€\s]*)?([\d,]+(?:\.\d{{1,2}})?)"
+            pattern = rf"\b{kw}\b(?:\s*[\(/][^)\n]*[\)/]?)?(?:\s*@\s*[\d.]+%|\s*rate\s*[\d.]+%)?[:\s\-]+(?:[A-Za-z$€\s]*)?([\d,]+(?:\.\d{{1,2}})?)"
             m = re.search(pattern, raw_text, re.IGNORECASE)
             if m:
                 try:
@@ -363,6 +363,11 @@ def extract_with_heuristics(raw_text: str, doc_hint: str = "document") -> Docume
         subtotal = sum(item.total_price for item in line_items)
     if total_amount == 0.0:
         total_amount = subtotal + tax
+    elif tax == 0.0 and total_amount > subtotal and subtotal > 0:
+        # Mathematical deduction: Agar total amount aur subtotal verified hain par OCR tax label chhoot gaya ho
+        tax = round(total_amount - subtotal, 2)
+    elif subtotal == 0.0 and total_amount > tax and tax > 0:
+        subtotal = round(total_amount - tax, 2)
 
     return DocumentDataSchema(
         document_type=doc_type,

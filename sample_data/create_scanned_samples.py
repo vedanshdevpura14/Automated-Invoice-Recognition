@@ -17,12 +17,12 @@ SCANNED_DOCS_DATA = {
         "vendor_addr": "Plot 42, Electronic City Phase 1, Bengaluru - 560100\nGSTIN: 29AABCA1234F1Z8",
         "bill_to": "Enterprise Corp Global\nUnit 5B, Cyber City, Gurugram - 122002",
         "items": [
-            ("LAP-DELL-5420", "Dell Latitude 5420 Laptops", "100", "50,000.00", "5,000,000.00")
+            ("LAP-DELL-5420", "Dell Latitude 5420 Laptops", "100", "50000.00", "5000000.00")
         ],
-        "subtotal": "5,000,000.00",
-        "tax": "900,000.00",
+        "subtotal": "5000000.00",
+        "tax": "900000.00",
         "tax_label": "Tax (18% GST)",
-        "total": "5,900,000.00",
+        "total": "5900000.00",
         "currency": "INR",
         "footer": "Authorized Signatory: Finance Controller\nSubject to Bengaluru Jurisdiction"
     },
@@ -36,12 +36,12 @@ SCANNED_DOCS_DATA = {
         "vendor_addr": "Plot 42, Electronic City Phase 1, Bengaluru - 560100",
         "bill_to": "Enterprise Corp Global\nProcurement Directorate",
         "items": [
-            ("LAP-DELL-5420", "Dell Latitude 5420 Laptops", "100", "50,000.00", "5,000,000.00")
+            ("LAP-DELL-5420", "Dell Latitude 5420 Laptops", "100", "50000.00", "5000000.00")
         ],
-        "subtotal": "5,000,000.00",
-        "tax": "900,000.00",
+        "subtotal": "5000000.00",
+        "tax": "900000.00",
         "tax_label": "Tax",
-        "total": "5,900,000.00",
+        "total": "5900000.00",
         "currency": "INR",
         "footer": "Approved By: Head of Global Procurement"
     },
@@ -51,7 +51,7 @@ SCANNED_DOCS_DATA = {
         "number_label": "GRN No",
         "number": "GRN-2026-SCAN101",
         "date": "2026-11-02",
-        "vendor": "ABC Technologies",
+        "vendor": "ABC Technologies Private Limited",
         "vendor_addr": "Delivered to: Central Warehouse Facility, Bangalore",
         "bill_to": "Warehouse Operations Directorate",
         "items": [
@@ -67,83 +67,108 @@ SCANNED_DOCS_DATA = {
 }
 
 
+def get_font(size: int):
+    """Returns a crisp TrueType font for accurate OCR reading."""
+    candidates = [
+        "arial.ttf",
+        "DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf"
+    ]
+    for font_name in candidates:
+        try:
+            return ImageFont.truetype(font_name, size)
+        except Exception:
+            continue
+    return ImageFont.load_default(size=size)
+
+
 def draw_document_image(data: dict) -> Image.Image:
-    """Renders a realistic scanned document page as a raster image."""
+    """Renders a realistic scanned document page as a high-DPI raster image."""
     width = 1200
     height = 1600
-    # Slightly off-white scanner background
-    img = Image.new("RGB", (width, height), color=(252, 252, 250))
+    # Slightly off-white scanner paper background
+    img = Image.new("RGB", (width, height), color=(253, 253, 251))
     draw = ImageDraw.Draw(img)
 
+    f_title = get_font(34)
+    f_header = get_font(22)
+    f_meta = get_font(20)
+    f_tbl_head = get_font(20)
+    f_tbl = get_font(20)
+    f_total = get_font(22)
+    f_stamp = get_font(18)
+    f_small = get_font(18)
+
     # Document border / margins
-    margin_x = 80
-    margin_y = 70
-    draw.rectangle([margin_x - 10, margin_y - 10, width - margin_x + 10, height - margin_y + 10], outline=(200, 200, 200), width=1)
+    margin_x = 70
+    margin_y = 60
+    draw.rectangle([margin_x - 10, margin_y - 10, width - margin_x + 10, height - margin_y + 10], outline=(210, 210, 210), width=1)
 
     # Header title
-    draw.text((margin_x, margin_y + 10), data["title"], fill=(20, 20, 40))
-    draw.line([margin_x, margin_y + 40, width - margin_x, margin_y + 40], fill=(50, 50, 80), width=2)
+    draw.text((margin_x, margin_y + 10), data["title"], fill=(15, 15, 35), font=f_title)
+    draw.line([margin_x, margin_y + 55, width - margin_x, margin_y + 55], fill=(40, 40, 70), width=2)
 
     # Document Meta (Number & Date)
-    draw.text((margin_x, margin_y + 60), f"{data['number_label']}: {data['number']}", fill=(0, 0, 0))
-    draw.text((width - margin_x - 220, margin_y + 60), f"Date: {data['date']}", fill=(0, 0, 0))
+    draw.text((margin_x, margin_y + 75), f"{data['number_label']}: {data['number']}", fill=(0, 0, 0), font=f_header)
+    draw.text((width - margin_x - 260, margin_y + 75), f"Date: {data['date']}", fill=(0, 0, 0), font=f_header)
 
     # Vendor & Buyer Info
-    draw.text((margin_x, margin_y + 110), f"Vendor / Supplier: {data['vendor']}", fill=(0, 0, 0))
-    y_offset = margin_y + 140
+    draw.text((margin_x, margin_y + 130), f"Vendor: {data['vendor']}", fill=(0, 0, 0), font=f_header)
+    y_offset = margin_y + 170
     for line in data["vendor_addr"].splitlines():
-        draw.text((margin_x, y_offset), line, fill=(60, 60, 60))
-        y_offset += 25
+        draw.text((margin_x, y_offset), line, fill=(50, 50, 50), font=f_meta)
+        y_offset += 30
 
     y_offset += 15
-    draw.text((margin_x, y_offset), "Recipient / Bill To:", fill=(0, 0, 0))
-    y_offset += 30
+    draw.text((margin_x, y_offset), "Bill To / Recipient:", fill=(0, 0, 0), font=f_header)
+    y_offset += 35
     for line in data["bill_to"].splitlines():
-        draw.text((margin_x, y_offset), line, fill=(60, 60, 60))
-        y_offset += 25
+        draw.text((margin_x, y_offset), line, fill=(50, 50, 50), font=f_meta)
+        y_offset += 30
 
     # Table Header
-    y_table = y_offset + 40
-    draw.rectangle([margin_x, y_table, width - margin_x, y_table + 35], fill=(235, 238, 245), outline=(180, 180, 180))
-    draw.text((margin_x + 10, y_table + 8), "Item Code", fill=(0, 0, 0))
-    draw.text((margin_x + 220, y_table + 8), "Description", fill=(0, 0, 0))
-    draw.text((margin_x + 600, y_table + 8), "Qty", fill=(0, 0, 0))
-    draw.text((margin_x + 720, y_table + 8), f"Unit Price ({data['currency']})", fill=(0, 0, 0))
-    draw.text((margin_x + 890, y_table + 8), f"Total ({data['currency']})", fill=(0, 0, 0))
+    y_table = y_offset + 35
+    draw.rectangle([margin_x, y_table, width - margin_x, y_table + 45], fill=(235, 238, 245), outline=(180, 180, 180))
+    draw.text((margin_x + 15, y_table + 10), "Item Code", fill=(0, 0, 0), font=f_tbl_head)
+    draw.text((margin_x + 230, y_table + 10), "Description", fill=(0, 0, 0), font=f_tbl_head)
+    draw.text((margin_x + 620, y_table + 10), "Qty", fill=(0, 0, 0), font=f_tbl_head)
+    draw.text((margin_x + 720, y_table + 10), f"Unit Price ({data['currency']})", fill=(0, 0, 0), font=f_tbl_head)
+    draw.text((margin_x + 910, y_table + 10), f"Total ({data['currency']})", fill=(0, 0, 0), font=f_tbl_head)
 
     # Table Rows
-    curr_y = y_table + 45
+    curr_y = y_table + 55
     for code, desc, qty, price, total in data["items"]:
-        draw.text((margin_x + 10, curr_y), code, fill=(0, 0, 0))
-        draw.text((margin_x + 220, curr_y), desc, fill=(0, 0, 0))
-        draw.text((margin_x + 600, curr_y), qty, fill=(0, 0, 0))
-        draw.text((margin_x + 720, curr_y), price, fill=(0, 0, 0))
-        draw.text((margin_x + 890, curr_y), total, fill=(0, 0, 0))
-        curr_y += 35
-        draw.line([margin_x, curr_y, width - margin_x, curr_y], fill=(220, 220, 220), width=1)
-        curr_y += 10
+        draw.text((margin_x + 15, curr_y), code, fill=(0, 0, 0), font=f_tbl)
+        draw.text((margin_x + 230, curr_y), desc, fill=(0, 0, 0), font=f_tbl)
+        draw.text((margin_x + 620, curr_y), qty, fill=(0, 0, 0), font=f_tbl)
+        draw.text((margin_x + 720, curr_y), price, fill=(0, 0, 0), font=f_tbl)
+        draw.text((margin_x + 910, curr_y), total, fill=(0, 0, 0), font=f_tbl)
+        curr_y += 45
+        draw.line([margin_x, curr_y, width - margin_x, curr_y], fill=(210, 210, 210), width=1)
+        curr_y += 15
 
     # Summary Totals (Subtotal, Tax, Total Amount)
-    summary_x = width - margin_x - 380
+    summary_x = width - margin_x - 440
     summary_y = curr_y + 40
-    draw.text((summary_x, summary_y), f"Subtotal: {data['currency']} {data['subtotal']}", fill=(0, 0, 0))
-    draw.text((summary_x, summary_y + 35), f"{data['tax_label']}: {data['currency']} {data['tax']}", fill=(0, 0, 0))
-    draw.line([summary_x, summary_y + 70, width - margin_x, summary_y + 70], fill=(0, 0, 0), width=2)
-    draw.text((summary_x, summary_y + 80), f"Total Amount: {data['currency']} {data['total']}", fill=(10, 10, 80))
-    draw.line([summary_x, summary_y + 115, width - margin_x, summary_y + 115], fill=(0, 0, 0), width=2)
+    draw.text((summary_x, summary_y), f"Subtotal: {data['currency']} {data['subtotal']}", fill=(0, 0, 0), font=f_total)
+    draw.text((summary_x, summary_y + 40), f"{data['tax_label']}: {data['currency']} {data['tax']}", fill=(0, 0, 0), font=f_total)
+    draw.line([summary_x, summary_y + 80, width - margin_x, summary_y + 80], fill=(0, 0, 0), width=2)
+    draw.text((summary_x, summary_y + 90), f"Total Amount: {data['currency']} {data['total']}", fill=(10, 10, 70), font=f_title)
+    draw.line([summary_x, summary_y + 135, width - margin_x, summary_y + 135], fill=(0, 0, 0), width=2)
 
-    # Scanned Stamp effect (Red or Blue ink simulation)
+    # Scanned Stamp effect (Simulated red ink verification stamp)
     stamp_x = margin_x + 60
     stamp_y = height - margin_y - 280
-    draw.rectangle([stamp_x, stamp_y, stamp_x + 240, stamp_y + 70], outline=(180, 40, 40), width=3)
-    draw.text((stamp_x + 15, stamp_y + 15), "[ VERIFIED & SCANNED ]", fill=(180, 40, 40))
-    draw.text((stamp_x + 35, stamp_y + 42), f"Date: {data['date']}", fill=(180, 40, 40))
+    draw.rectangle([stamp_x, stamp_y, stamp_x + 260, stamp_y + 80], outline=(180, 40, 40), width=3)
+    draw.text((stamp_x + 20, stamp_y + 15), "[ VERIFIED & SCANNED ]", fill=(180, 40, 40), font=f_stamp)
+    draw.text((stamp_x + 45, stamp_y + 45), f"Date: {data['date']}", fill=(180, 40, 40), font=f_stamp)
 
     # Footer Notes
     footer_y = height - margin_y - 120
     for line in data["footer"].splitlines():
-        draw.text((margin_x, footer_y), line, fill=(100, 100, 100))
-        footer_y += 25
+        draw.text((margin_x, footer_y), line, fill=(90, 90, 90), font=f_small)
+        footer_y += 30
 
     return img
 
