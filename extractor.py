@@ -2,9 +2,11 @@ import os
 import re
 import io
 import json
+import shutil
 from typing import Optional
 from pathlib import Path
 import fitz  # PyMuPDF library: digital PDFs se text fast extract karne ke liye
+from PIL import Image
 
 from models import DocumentDataSchema, LineItemSchema
 
@@ -14,26 +16,43 @@ from models import DocumentDataSchema, LineItemSchema
 # Presentation Architecture ke hisaab se:
 # - PyMuPDF digital PDFs ko ultra-fast parse karta hai
 # - Tesseract OCR scanned images aur non-selectable PDFs se text extract karta hai
-TESSERACT_AVAILABLE = False
-try:
-    import pytesseract
-    from PIL import Image
 
-    # Windows par Tesseract ke standard paths check karo
+def detect_tesseract_binary() -> bool:
+    """
+    Asli Tesseract binary check using shutil.which and OS-specific executable paths.
+    Sirf python import nahi, balki binary file ki actual existence verify karta hai.
+    """
+    try:
+        import pytesseract
+    except ImportError:
+        return False
+
+    # 1. PATH me tesseract binary dhoondho (Linux / Docker / Mac / Windows with PATH)
+    binary_in_path = shutil.which("tesseract")
+    if binary_in_path:
+        pytesseract.pytesseract.tesseract_cmd = binary_in_path
+        return True
+
+    # 2. Windows par standard installation paths check karo
     possible_tesseract_paths = [
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
         os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe")
     ]
     for p in possible_tesseract_paths:
-        if os.path.exists(p):
+        if os.path.isfile(p):
             pytesseract.pytesseract.tesseract_cmd = p
-            break
-    TESSERACT_AVAILABLE = True
-except ImportError:
-    TESSERACT_AVAILABLE = False
+            return True
 
-# Comment: Agar system me Tesseract installed hai toh OCR directly run hoga, nahi toh safe text extractor chalega taaki code kabhi crash na ho.
+    return False
+
+TESSERACT_AVAILABLE = detect_tesseract_binary()
+
+def is_tesseract_available() -> bool:
+    """Dynamic getter jo actual Tesseract binary availability return karta hai."""
+    return bool(TESSERACT_AVAILABLE)
+
+# Comment: Agar system me Tesseract binary (shutil.which) verified hai toh OCR directly run hoga, nahi toh safe text extractor chalega.
 
 
 # ==========================================================

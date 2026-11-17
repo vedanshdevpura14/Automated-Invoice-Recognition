@@ -46,15 +46,20 @@ def check_duplicate_invoice_number(
     if not db or not invoice_number:
         return None
 
-    # Database query: check for existing non-pending record with same invoice number
+    clean_inv = str(invoice_number).strip()
+    if not clean_inv:
+        return None
+
+    # Database query: check for existing record with same invoice number
     existing = db.query(ReconciliationRecord).filter(
-        ReconciliationRecord.invoice_number.ilike(invoice_number.strip())
+        ReconciliationRecord.invoice_number.ilike(clean_inv)
     ).order_by(desc(ReconciliationRecord.created_at)).first()
 
     if existing:
+        date_str = existing.created_at.strftime('%Y-%m-%d') if existing.created_at else 'Earlier'
         return (
-            f"DUPLICATE_INVOICE_NUMBER: Invoice #{invoice_number} already exists in database "
-            f"(Audit Code: {existing.reconciliation_code}, Status: {existing.status}, Processed: {existing.created_at.strftime('%Y-%m-%d') if existing.created_at else 'Earlier'}). "
+            f"DUPLICATE_INVOICE_NUMBER: Invoice #{clean_inv} already exists in database "
+            f"(Audit Code: {existing.reconciliation_code}, Status: {existing.status}, Processed: {date_str}). "
             f"Potential double-billing detected!"
         )
     return None
@@ -85,9 +90,12 @@ def check_fuzzy_duplicate_billing(
         ReconciliationRecord.invoice_total <= max_amt
     ).all()
 
+    curr_inv_clean = (current_invoice_num or "").strip().upper()
+
     for rec in suspicious_recs:
+        rec_inv_clean = (rec.invoice_number or "").strip().upper()
         # Ignore agar same record ho
-        if rec.invoice_number.strip().upper() == current_invoice_num.strip().upper():
+        if rec_inv_clean and curr_inv_clean and rec_inv_clean == curr_inv_clean:
             continue
         # Vendor match check
         if are_vendors_matching(rec.vendor_name, vendor_name):

@@ -32,7 +32,7 @@ from agent import arbitrate_exceptions
 # ==========================================================
 
 
-class ReconciliationGraphState(TypedDict):
+class ReconciliationGraphState(TypedDict, total=False):
     """
     LangGraph Workflow State:
     Har node is state dictionary ko read karta hai aur apne output ke sath update karta hai.
@@ -41,6 +41,7 @@ class ReconciliationGraphState(TypedDict):
     invoice_file_path: str
     po_file_path: str
     grn_file_path: str
+    db: Optional[Any]  # Database session for historical duplicate & fraud checks
 
     # Node 1: Extraction Outputs
     invoice_raw_text: str
@@ -151,12 +152,14 @@ def fraud_detection_node(state: ReconciliationGraphState) -> Dict[str, Any]:
     po_doc = DocumentDataSchema.model_validate(state["po_data"])
     grn_doc = DocumentDataSchema.model_validate(state["grn_data"])
     match_res = ThreeWayMatchResult.model_validate(state["match_result"])
+    db = state.get("db")
 
     fraud_res = evaluate_fraud_and_duplicates(
         invoice=invoice_doc,
         po=po_doc,
         grn=grn_doc,
-        match_result=match_res
+        match_result=match_res,
+        db=db
     )
 
     return {
@@ -268,13 +271,18 @@ def completion_node(state: ReconciliationGraphState) -> Dict[str, Any]:
     execution_path.append("Node 6: Auto-Reconciliation Completed")
 
     # Clean match ke liye positive arbitration banate hain
+    db_checked = state.get("db") is not None
+    findings = ["Zero financial variance"]
+    findings.append("No duplicate billing detected (Database verified)" if db_checked else "No duplicate billing detected")
+    findings.append("Warehouse GRN fully reconciled")
+
     clean_arbitration = ArbitrationResponse(
         risk_severity="LOW",
         confidence_score=99.5,
         summary="Automated 3-way reconciliation matched 100%. Quantities, unit rates, tax calculations, and vendor identity verified with zero variance.",
         recommended_action="AUTO_APPROVE",
         dispute_email_draft="No dispute required. Three-way match verified for automated payment authorization.",
-        findings=["Zero financial variance", "No duplicate billing detected", "Warehouse GRN fully reconciled"]
+        findings=findings
     )
 
     return {
@@ -342,7 +350,8 @@ def run_reconciliation_workflow(
     session_id: str,
     invoice_file_path: str,
     po_file_path: str,
-    grn_file_path: str
+    grn_file_path: str,
+    db: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     Single unified entrypoint jo LangGraph multi-agent pipeline ko run karta hai:
@@ -353,6 +362,7 @@ def run_reconciliation_workflow(
         "invoice_file_path": invoice_file_path,
         "po_file_path": po_file_path,
         "grn_file_path": grn_file_path,
+        "db": db,
         "invoice_raw_text": "",
         "po_raw_text": "",
         "grn_raw_text": "",

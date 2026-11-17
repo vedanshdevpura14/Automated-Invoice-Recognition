@@ -6,11 +6,11 @@ from models import (
     ReconciliationRecord
 )
 from matcher import perform_three_way_reconciliation, are_vendors_matching
-from extractor import extract_document, extract_text_from_file
+from extractor import extract_document, extract_text_from_file, is_tesseract_available, detect_tesseract_binary
 from agent import arbitrate_deterministic
 from fraud import evaluate_fraud_and_duplicates, check_duplicate_invoice_number
 from workflow import run_reconciliation_workflow, compiled_graph
-from app import health_check, run_demo_scenario, get_dashboard_metrics, export_reconciliation_csv
+from app import health_check, run_demo_scenario, get_dashboard_metrics, export_reconciliation_csv, upload_and_reconcile
 
 # ==========================================================
 # Automated Test Suite for Automated Invoice Recognition
@@ -276,6 +276,93 @@ def test_api_pipeline():
     finally:
         db.close()
 # Comment: Pure system ka end-to-end integration test jo database, LangGraph, Fraud Shield, APIs aur CSV export sab verify karta hai.
+
+
+def test_tesseract_binary_detection_and_dynamic_health():
+    """Tesseract OCR binary detection (shutil.which) aur dynamic /api/health verify karta hai."""
+    import shutil
+    db = SessionLocal()
+    try:
+        # 1. detect_tesseract_binary() returns boolean reflecting real binary existence
+        is_avail = is_tesseract_available()
+        assert isinstance(is_avail, bool)
+
+        # 2. Health check must not be hardcoded
+        health = health_check(db)
+        assert "tesseract_binary_installed" in health
+        assert health["tesseract_binary_installed"] == is_avail
+
+        if is_avail:
+            assert "Binary Active" in health["ocr_engine"]
+        else:
+            assert "Tesseract binary missing" in health["ocr_engine"]
+    finally:
+        db.close()
+
+
+def test_duplicate_invoice_detection_on_real_upload():
+    """
+    Verify karta hai ki real upload endpoint (upload_and_reconcile) par:
+    1. First upload -> Clean match hone par MATCHED status deta hai
+    2. Exact same files dobara upload karne par -> Fraud Shield DUPLICATE_INVOICE_NUMBER pakadta hai,
+       status VARIANCE_DETECTED banta hai, LangGraph Node 4 (Arbitration) par route hota hai,
+       aur completion node ka false 'No duplicate billing detected' claim rokta hai.
+    """
+    import io, uuid
+    from fastapi import UploadFile
+    db = SessionLocal()
+    try:
+        uid = str(uuid.uuid4())[:8].upper()
+        inv_text = f"INVOICE\nVendor: Global Test Supplies Ltd\nInvoice No: INV-DUP-{uid}\nTotal: 25000.0\nSubtotal: 25000.0\nTax: 0.0\nITEM-X | Widget X | 25.0 | 1000.0 | 25000.0"
+        po_text = f"PURCHASE ORDER\nVendor: Global Test Supplies Ltd\nPO No: PO-DUP-{uid}\nTotal: 25000.0\nSubtotal: 25000.0\nTax: 0.0\nITEM-X | Widget X | 25.0 | 1000.0 | 25000.0"
+        grn_text = f"GOODS RECEIPT NOTE\nVendor: Global Test Supplies Ltd\nGRN No: GRN-DUP-{uid}\nTotal: 0.0\nITEM-X | Widget X | 25.0 | 0.0 | 0.0"
+
+        # 1st Upload: Pehli baar clean match pass hona chahiye
+        f_inv1 = UploadFile(filename="invoice.txt", file=io.BytesIO(inv_text.encode("utf-8")))
+        f_po1 = UploadFile(filename="po.txt", file=io.BytesIO(po_text.encode("utf-8")))
+        f_grn1 = UploadFile(filename="grn.txt", file=io.BytesIO(grn_text.encode("utf-8")))
+
+        res1 = upload_and_reconcile(f_inv1, f_po1, f_grn1, db)
+        assert res1["status"] == "MATCHED"
+        assert res1["is_fraud_suspected"] is False
+        assert len(res1["fraud_flags"]) == 0
+        assert "Node 6: Auto-Reconciliation Completed" in res1["langgraph_execution_path"]
+
+        # 2nd Upload: Exact same files dobara upload -> Fraud Shield ko pakadna chahiye
+        f_inv2 = UploadFile(filename="invoice.txt", file=io.BytesIO(inv_text.encode("utf-8")))
+        f_po2 = UploadFile(filename="po.txt", file=io.BytesIO(po_text.encode("utf-8")))
+        f_grn2 = UploadFile(filename="grn.txt", file=io.BytesIO(grn_text.encode("utf-8")))
+
+        res2 = upload_and_reconcile(f_inv2, f_po2, f_grn2, db)
+        assert res2["status"] != "MATCHED"
+        assert res2["is_fraud_suspected"] is True
+        assert res2["fraud_risk_level"] == "CRITICAL"
+        assert any("DUPLICATE_INVOICE_NUMBER" in flag for flag in res2["fraud_flags"])
+        assert "Node 4: AI Arbitration Agent" in res2["langgraph_execution_path"]
+        assert "Node 6: Auto-Reconciliation Completed" not in res2["langgraph_execution_path"]
+        assert "REJECT_INVOICE" in str(res2["recommended_action"] if "recommended_action" in res2 else res2["dispute_email_draft"]) or "fraud" in res2["arbitration_summary"].lower()
+    finally:
+        db.close()
+
+
+def test_scanned_pdf_sample_properties():
+    """
+    Verify karta hai ki sample_data me authentic scanned PDFs maujood hain:
+    1. Digital text layer 0 characters hai (authentic scanned raster PDF).
+    2. extract_text_from_file safely execute hota hai (crash-free fallback ya OCR).
+    """
+    import fitz
+    from pathlib import Path
+    scanned_inv = Path("sample_data/invoice_scanned_sample.pdf")
+    assert scanned_inv.exists(), "Scanned invoice sample file should exist in sample_data"
+
+    with fitz.open(str(scanned_inv)) as doc:
+        # Authentic scanned PDF me selectable text 0 hona chahiye
+        assert len(doc[0].get_text().strip()) == 0
+
+    extracted = extract_text_from_file(str(scanned_inv))
+    assert isinstance(extracted, str)
+    assert len(extracted) > 0
 
 
 if __name__ == "__main__":

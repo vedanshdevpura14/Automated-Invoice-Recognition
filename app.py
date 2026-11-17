@@ -32,7 +32,12 @@ from models import (
     record_audit_log,
     update_vendor_memory
 )
-from extractor import extract_text_from_file, extract_document
+from extractor import (
+    extract_text_from_file,
+    extract_document,
+    is_tesseract_available,
+    TESSERACT_AVAILABLE
+)
 from matcher import perform_three_way_reconciliation
 from agent import arbitrate_exceptions
 from fraud import evaluate_fraud_and_duplicates
@@ -108,6 +113,12 @@ def health_check(db: Session = Depends(get_db)):
     """System ki health, database connectivity, LangGraph orchestration aur Fraud Shield status check karta hai."""
     total_recs = db.query(ReconciliationRecord).count()
     has_gemini = bool(os.getenv("GEMINI_API_KEY") and len(os.getenv("GEMINI_API_KEY", "")) > 8)
+    tesseract_active = is_tesseract_available()
+    ocr_engine_status = (
+        "PyMuPDF + Tesseract OCR Engine (Binary Active)"
+        if tesseract_active
+        else "PyMuPDF (Digital PDFs Only; Tesseract binary missing on host)"
+    )
     return {
         "status": "healthy",
         "version": "2.0.0",
@@ -116,7 +127,8 @@ def health_check(db: Session = Depends(get_db)):
         "gemini_api_configured": has_gemini,
         "timezone": "IST (UTC+05:30)",
         "orchestration_engine": "LangGraph Stateful Multi-Agent StateGraph",
-        "ocr_engine": "PyMuPDF + Tesseract OCR Engine",
+        "ocr_engine": ocr_engine_status,
+        "tesseract_binary_installed": tesseract_active,
         "fraud_shield_engine": "7-Tier Duplicate & Fraud Detection Shield Active",
         "ai_extraction_mode": "Gemini 2.5 Flash" if has_gemini else "Deterministic Heuristics Engine (Offline Safe)",
         "ai_arbitration_mode": "Gemini 2.5 Pro" if has_gemini else "Deterministic Reasoner (Offline Safe)"
@@ -249,7 +261,8 @@ def upload_and_reconcile(
             session_id=session_id,
             invoice_file_path=file_paths["invoice"],
             po_file_path=file_paths["po"],
-            grn_file_path=file_paths["grn"]
+            grn_file_path=file_paths["grn"],
+            db=db
         )
 
         invoice_data = DocumentDataSchema.model_validate(graph_state["invoice_data"])
@@ -258,6 +271,36 @@ def upload_and_reconcile(
         match_result = ThreeWayMatchResult.model_validate(graph_state["match_result"])
         arbitration = ArbitrationResponse.model_validate(graph_state["arbitration_result"])
         fraud_result = graph_state.get("fraud_result") or {}
+
+        # Defensive Verification: Real upload duplicate & fraud verification against DB
+        if not graph_state.get("is_fraud_suspected"):
+            db_fraud = evaluate_fraud_and_duplicates(
+                invoice=invoice_data,
+                po=po_data,
+                grn=grn_data,
+                match_result=match_result,
+                db=db
+            )
+            if db_fraud.is_fraud_suspected:
+                graph_state["is_fraud_suspected"] = True
+                graph_state["fraud_risk_level"] = db_fraud.fraud_risk_level
+                graph_state["fraud_flags"] = db_fraud.flags
+                fraud_result = db_fraud.model_dump()
+                graph_state["fraud_result"] = fraud_result
+                effective_risk = "CRITICAL" if db_fraud.fraud_risk_level == "CRITICAL" else "HIGH"
+                updated_findings = list(arbitration.findings)
+                for flag in db_fraud.flags:
+                    if flag not in updated_findings:
+                        updated_findings.append(f"[FRAUD SHIELD ALERT] {flag}")
+                arbitration = ArbitrationResponse(
+                    risk_severity=effective_risk,
+                    confidence_score=max(arbitration.confidence_score, 96.0),
+                    summary=f"Reconciliation security flags identified. {len(db_fraud.flags)} fraud/duplicate check(s) triggered against historical DB. {arbitration.summary}",
+                    recommended_action="REJECT_INVOICE" if effective_risk == "CRITICAL" else "HUMAN_INVESTIGATION",
+                    dispute_email_draft=arbitration.dispute_email_draft,
+                    findings=updated_findings
+                )
+
         execution_path_str = " -> ".join(graph_state.get("execution_path", []))
 
         # Audit log me LangGraph events record karo
